@@ -25,7 +25,7 @@ def update(frame=0):
     
     position = bot.position
     energy = bot.energy
-    bot.forward(0, environment)
+    bot.forward(np.array(0.0), environment)
     move = True
     distance += np.linalg.norm(position - bot.position)
     bot.camera.render(bot.position, bot.direction,
