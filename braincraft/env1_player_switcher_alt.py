@@ -4,6 +4,7 @@
 Example and evaluation of the performances of a handcrafter switcher player.
 """
 
+import numpy as np
 from bot import Bot
 from environment_1 import Environment
 
@@ -99,8 +100,7 @@ def switcher_player():
 
 
 if __name__ == "__main__":
-    import time
-    import numpy as np    
+    import time   
     from challenge_1 import train, evaluate
     
     seed = 78

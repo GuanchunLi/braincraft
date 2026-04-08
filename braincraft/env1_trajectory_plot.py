@@ -22,7 +22,7 @@ from environment_1 import Environment
 # Add new entries here to expose them on the command line.
 # Default models to plot when no --models flag is passed on the CLI.
 # Edit this list to change which models render by default.
-DEFAULT_MODELS = ["random"]
+DEFAULT_MODELS = ["ensemble_v3_metric"]
 
 # Default seeds (one column per seed).
 DEFAULT_SEEDS = [12345, 1, 2, 7]
@@ -196,7 +196,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     models = sorted(PLAYERS) if args.models == ["all"] else args.models
-    save_path = args.save or f"trajectory_{'_'.join(models)}.png"
+    save_path = args.save or f"trajectory_env1_{'_'.join(models)}.png"
     plot_models(
         player_keys=models,
         seeds=args.seeds,
