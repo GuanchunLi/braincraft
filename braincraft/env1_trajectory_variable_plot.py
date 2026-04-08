@@ -31,7 +31,7 @@ from env1_trajectory_plot import PLAYERS, load_model
 
 DEFAULT_MODELS = ["dummy3"]
 DEFAULT_SEEDS = [12345, 1, 2, 7]
-DEFAULT_VAR = "prox[63]-prox[0]"  # prox[left_side_idx] in dummy3
+DEFAULT_VAR = "prox[52]-prox[11]"  # prox[left_side_idx] in dummy3
 
 
 def run_trajectory_with_var(player_key, var_expr, seed=12345, max_steps=None):

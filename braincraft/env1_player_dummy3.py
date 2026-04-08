@@ -160,14 +160,14 @@ def dummy_player():
     # Safety term is safety_gain_left*relu_tanh(X3 - safety_target) + safety_gain_right*relu_tanh(X4 - safety_target)
     safety_gain_left = np.radians(-20.0)
     safety_gain_right= -safety_gain_left
-    safety_target = 0.68
+    safety_target = 0.7
     Win[3, bias_idx] = -safety_target
     Win[4, bias_idx] = -safety_target
     # Front-block gate: strong right turn once activated; saturates easily.
     front_gain = np.radians(-20.0)
     # Post-reward shortcut: extra right turn once X8 has latched and the
     # right side opens up while the left wall is still present.
-    post_reward_gain = 1.0 * front_gain
+    post_reward_gain = 0.0 * front_gain
     # heading_gain += post_reward_gain
 
     # O = hit_turn*X0
