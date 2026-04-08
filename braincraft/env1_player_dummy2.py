@@ -72,22 +72,20 @@ def dummy_player():
 
     # Feature neurons:
     #   X0 = relu_tanh(hit)                                     corner snap
-    #   X1 = relu_tanh(bias) = tanh(1)                          constant
-    #   X2 = relu_tanh(prox[L])                                 heading (+)
-    #   X3 = relu_tanh(prox[R])                                 heading (-)
-    #   X4 = relu_tanh(prox[left_side_idx])                          safety valve (left side)
-    #   X5 = relu_tanh(prox[right_side_idx])                          safety valve (right side)
-    #   X6 = relu_tanh(prox[L] + prox[R] - front_thr)           front-block
+    #   X1 = relu_tanh(prox[L])                                 heading (+)
+    #   X2 = relu_tanh(prox[R])                                 heading (-)
+    #   X3 = relu_tanh(prox[left_side_idx])                          safety valve (left side)
+    #   X4 = relu_tanh(prox[right_side_idx])                          safety valve (right side)
+    #   X5 = relu_tanh(prox[L] + prox[R] - front_thr)           front-block
     #        -> ~0 during cruising, >0 only when the forward field is
     #           obstructed. Dominates the heading term at corners so the
     #           heading signal cannot fight the CW turn when the right ray
     #           starts to see past the corner.
     Win[0, hit_idx] = 1.0
-    Win[1, bias_idx] = 1.0
-    Win[2, L_idx] = 1.0
-    Win[3, R_idx] = 1.0
-    Win[4, left_side_idx] = -1.0
-    Win[5, right_side_idx] = -1.0
+    Win[1, L_idx] = 1.0
+    Win[2, R_idx] = 1.0
+    Win[3, left_side_idx] = -1.0
+    Win[4, right_side_idx] = -1.0
 
     # Front-block gate must reflect the *actual* forward distance. Using the
     # off-center rays L_idx/R_idx gives false positives when the bot sits in
@@ -95,9 +93,9 @@ def dummy_player():
     # true center rays instead.
     C1_idx, C2_idx = 31, 32
     front_thr = 1.4  # cruise sum is ~1.3 at start, trips as front wall nears
-    Win[6, C1_idx] = 1.0
-    Win[6, C2_idx] = 1.0
-    Win[6, bias_idx] = -front_thr
+    Win[5, C1_idx] = 1.0
+    Win[5, C2_idx] = 1.0
+    Win[5, bias_idx] = -front_thr
 
     TANH1 = np.tanh(1.0)  # ~0.7616 -- X1 value after relu_tanh
 
@@ -108,28 +106,27 @@ def dummy_player():
     hit_turn = np.radians(-10.0) / TANH1   # saturates to -5 deg on hit
     # Heading term: want ~2-3 deg of correction per unit of (prox[L]-prox[R]).
     heading_gain = np.radians(-40)
-    # Front-block gate: strong right turn once activated; saturates easily.
-    front_gain = np.radians(-20.0)
     # Safety valve: very small, only matters when the left side ray deviates
     # significantly from the target proximity.
-    # Safety term is safety_gain_left*relu_tanh(safety_target - X4) + safety_gain_right*relu_tanh(safety_target - X5)
+    # Safety term is safety_gain_left*relu_tanh(safety_target - X3) + safety_gain_right*relu_tanh(safety_target - X4)
     safety_gain_left = np.radians(-20.0)
     safety_gain_right= -safety_gain_left
     safety_target = 0.75
+    Win[3, bias_idx] = safety_target
     Win[4, bias_idx] = safety_target
-    Win[5, bias_idx] = safety_target
-    
+    # Front-block gate: strong right turn once activated; saturates easily.
+    front_gain = np.radians(-20.0)
 
     # O = hit_turn*X0
-    #   + heading_gain*(X2 - X3)
-    #   + front_gain*X5
+    #   + heading_gain*(X1 - X2)
+    #   + front_gain*X3
     #   + safety_term
     Wout[0, 0] = hit_turn
-    Wout[0, 2] = heading_gain
-    Wout[0, 3] = -heading_gain
-    Wout[0, 4] = safety_gain_left
-    Wout[0, 5] = safety_gain_right
-    Wout[0, 6] = front_gain
+    Wout[0, 1] = heading_gain
+    Wout[0, 2] = -heading_gain
+    Wout[0, 3] = safety_gain_left
+    Wout[0, 4] = safety_gain_right
+    Wout[0, 5] = front_gain
 
     model = Win, W, Wout, warmup, leak, f, g
     yield model
