@@ -22,7 +22,7 @@ from environment_1 import Environment
 # Add new entries here to expose them on the command line.
 # Default models to plot when no --models flag is passed on the CLI.
 # Edit this list to change which models render by default.
-DEFAULT_MODELS = ["ensemble_v3_metric"]
+DEFAULT_MODELS = ["dummy2"]
 
 # Default seeds (one column per seed).
 DEFAULT_SEEDS = [12345, 1, 2, 7]
@@ -30,6 +30,7 @@ DEFAULT_SEEDS = [12345, 1, 2, 7]
 
 PLAYERS = {
     "dummy":              ("env1_player_dummy",              "dummy_player"),
+    "dummy2":              ("env1_player_dummy2",              "dummy_player"),
     "random":             ("env1_player_random",             "random_player"),
     "simple":             ("env1_player_simple",             "simple_player"),
     "switcher":           ("env1_player_switcher",           "switcher_player"),
