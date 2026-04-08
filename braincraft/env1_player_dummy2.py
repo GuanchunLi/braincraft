@@ -104,13 +104,13 @@ def dummy_player():
     # every term saturates every step.
     hit_turn = np.radians(-10.0) / TANH1   # saturates to -5 deg on hit
     # Heading term: want ~2-3 deg of correction per unit of (prox[L]-prox[R]).
-    heading_gain = np.radians(6.0)
+    heading_gain = np.radians(8)
     # Front-block gate: strong right turn once activated; saturates easily.
     front_gain = np.radians(-20.0)
     # Safety valve: very small, only matters when the left side ray deviates
     # significantly from the target proximity.
-    safety_gain = np.radians(-15.0)
-    safety_target = 0.75
+    safety_gain = np.radians(-20.0)
+    safety_target = 0.65
     # Safety term is   safety_gain*(X4 - tanh(safety_target))
     # and X1 carries the bias (value = TANH1), so the coefficient on X1 is
     # chosen to cancel at X4 = tanh(safety_target).
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     model = train(dummy_player, timeout=100)
 
     start_time = time.time()
-    score, std = evaluate(model, Bot, Environment, debug=False, seed=seed)
+    score, std = evaluate(model, Bot, Environment, debug=False, seed=seed, runs=4)
     elapsed = time.time() - start_time
     print(f"Evaluation completed after {elapsed:.2f} seconds")
     print(f"Final score: {score:.2f} ± {std:.2f}")
