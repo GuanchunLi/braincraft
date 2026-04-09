@@ -34,6 +34,7 @@ PLAYERS = {
     "dummy3":             ("env1_player_dummy3",             "dummy_player"),
     "dummy4":             ("env1_player_dummy4",             "dummy_player"),
     "reflex":             ("env1_player_reflex",             "reflex_player"),
+    "reflex2":            ("env1_player_reflex2",            "reflex2_player"),
     "random":             ("env1_player_random",             "random_player"),
     "simple":             ("env1_player_simple",             "simple_player"),
     "switcher":           ("env1_player_switcher",           "switcher_player"),
