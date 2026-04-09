@@ -5,17 +5,13 @@
 """
 Deterministic Task 1 dummy3 player.
 
-Same steering controller as env1_player_dummy2 (identical output), with an
-additional internal reservoir state `is_rewarded` latched inside X(t):
+Same steering scaffold as env1_player_dummy2, with an internal reward-state
+subcircuit and a post-reward shortcut detector inside X(t):
 
-- X8 starts at 0,
-- flips to ~1 the first step after the bot's energy is replenished by an
-  energy source (i.e. energy(t) > energy(t-1)),
-- stays at ~1 for the remainder of the run.
-
-This is implemented with three extra neurons (X6: delayed energy copy,
-X7: reward pulse detector, X8: self-exciting latch) and zero contribution to
-Wout, so the steering behavior is identical to dummy2.
+- X8 emits a transient pulse one step after the first observable energy rise,
+- X9 latches `is_rewarded` from that pulse and stays near 1 thereafter,
+- X10 stays silent until X9 is high, then detects the post-reward outermost-
+  ray asymmetry that unlocks the shortcut turn.
 """
 
 import time
@@ -99,52 +95,63 @@ def dummy_player():
     Win[5, bias_idx] = -front_thr
 
     # ------------------------------------------------------------------
-    # is_rewarded internal state (does NOT contribute to output).
+    # Reward-state internal circuit.
     #
-    #   X6 = delayed copy of (scaled) energy
-    #   X7 = reward pulse: saturates to ~1 on the step where energy jumps up
-    #   X8 = latched is_rewarded: 0 until first refill, then pinned at ~1
+    #   X6  = delayed copy of scaled energy
+    #   X7  = "armed" latch, used only to suppress the startup false positive
+    #   X8  = transient reward pulse after the first net energy increase
+    #   X9  = latched is_rewarded: 0 until first refill, then pinned at ~1
+    #   X10 = post-reward outermost-ray asymmetry detector
     #
     # Update rule is X(t+1) = relu_tanh(Win @ I(t) + W @ X(t)) with leak=1.
     # ------------------------------------------------------------------
-    K = 0.1        # near-linear scale for energy copy (tanh(0.1) ~ 0.0997)
-    K_big = 100.0  # high-gain edge detector
+    K = 0.005
+    arm_from_energy = 1000.0
+    arm_latch = 10.0
+    pulse_gain = 100000.0
+    pulse_thr = 0.2
+    arm_gate = 1000.0
     latch_gain = 10.0
 
-    # X6: X6(t+1) = relu_tanh(K * energy(t))  ~  K * energy(t)
+    # X6 tracks the previous step's energy in a near-linear regime so the
+    # pulse detector can compare consecutive samples without the startup
+    # sample looking like a reward.
     Win[6, energy_idx] = K
 
-    # X7: relu_tanh( K_big * K * energy(t) - K_big * X6(t) )
-    #   ~ relu_tanh( K_big * K * (energy(t) - energy(t-1)) )
-    # Normal per-step drain (~1e-3) gives ~ -0.01 -> clamped to 0.
-    # A refill jump gives a large positive argument -> saturates near +1.
-    Win[7, energy_idx] = K_big * K
-    W[7, 6] = -K_big
+    # X7 becomes high once X6 has stored one valid energy sample and then
+    # stays high. This gates X8 off during the uninitialized startup step.
+    W[7, 6] = arm_from_energy
+    W[7, 7] = arm_latch
 
-    # X8: self-exciting latch set by the reward pulse.
-    # X8(t+1) = relu_tanh(latch_gain * X8(t) + latch_gain * X7(t))
-    # Once either input is appreciably positive, argument >> 1 -> X8 ~ 1,
-    # and the self-feedback then keeps it pinned near 1 for the rest of the
-    # run (no decay, since leak = 1.0).
-    W[8, 7] = latch_gain
-    W[8, 8] = latch_gain
-    # The is_rewarded internal state lives at X[8].
+    # X8: pulse on the first positive net energy jump after the arm is high.
+    # The large positive gate from X7 is cancelled by the bias until armed.
+    Win[8, energy_idx] = pulse_gain * K
+    W[8, 6] = -pulse_gain
+    W[8, 7] = arm_gate
+    Win[8, bias_idx] = -(arm_gate + pulse_thr)
 
     # ------------------------------------------------------------------
-    # X9: post-reward "left wall present, right side open" detector.
-    # Silent (clamped to 0) while X8 ~ 0, so behavior before the first
-    # reward is identical to dummy2 / V1 dummy3. Once X8 latches to ~1,
-    # fires when prox[left_side] exceeds prox[right_side] by `margin`,
+    # X9: self-exciting is_rewarded latch driven by the transient X8 pulse.
+    # Once set, it stays pinned near 1 for the remainder of the run.
+    # ------------------------------------------------------------------
+    W[9, 8] = latch_gain
+    W[9, 9] = latch_gain
+
+    # ------------------------------------------------------------------
+    # X10: post-reward outermost-ray asymmetry detector.
+    # Silent (clamped to 0) while X9 ~ 0, so behavior before the first
+    # reward is identical to dummy2 / V1 dummy3. Once X9 latches to ~1,
+    # fires when prox[63] exceeds prox[0] by `margin`,
     # driving an extra right turn that lets the bot peel off into the
     # inner corridor and run only half of the outer ring.
     # ------------------------------------------------------------------
     K9 = 3.0
-    margin = 0.12
-    G8 = 10.0
-    Win[9, left_side_idx]  =  K9
-    Win[9, right_side_idx] = -K9
-    Win[9, bias_idx]       = -(G8 + K9 * margin)
-    W[9, 8] = G8
+    margin = 0.0
+    G9 = 10.0
+    Win[10, 0] = -K9
+    Win[10, 63] = K9
+    Win[10, bias_idx] = -(G9 + K9 * margin)
+    W[10, 9] = G9
 
     TANH1 = np.tanh(1.0)  # ~0.7616 -- X1 value after relu_tanh
 
@@ -165,22 +172,23 @@ def dummy_player():
     Win[4, bias_idx] = -safety_target
     # Front-block gate: strong right turn once activated; saturates easily.
     front_gain = np.radians(-20.0)
-    # Post-reward shortcut: extra right turn once X8 has latched and the
+    # Post-reward shortcut: extra right turn once X9 has latched and the
     # right side opens up while the left wall is still present.
-    post_reward_gain = 0.0 * front_gain
+    post_reward_gain = 0.0 * front_gain # No steering yet
     # heading_gain += post_reward_gain
 
     # O = hit_turn*X0
     #   + heading_gain*(X1 - X2)
-    #   + front_gain*X3
     #   + safety_term
+    #   + front_gain*X5
+    #   + post_reward_gain*X10
     Wout[0, 0] = hit_turn
     Wout[0, 1] = heading_gain
     Wout[0, 2] = -heading_gain
     Wout[0, 3] = safety_gain_left
     Wout[0, 4] = safety_gain_right
     Wout[0, 5] = front_gain
-    Wout[0, 9] = post_reward_gain
+    Wout[0, 10] = post_reward_gain
 
     model = Win, W, Wout, warmup, leak, f, g
     yield model
