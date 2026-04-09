@@ -136,8 +136,8 @@ per-neuron logic needed).
 |--------|-----------------|-------------|
 | X15 | `Win[15, 65] = K = 0.005` | Delayed energy copy.  Stores a scaled version of the previous step's energy in the near-linear regime of `relu_tanh`.  The scaling factor K = 0.005 keeps `K * energy` small enough that `tanh(K*e) ~ K*e`. |
 | X16 | `W[16,15] = 1000`, `W[16,16] = 10` | Armed latch.  Becomes high once X15 has stored one valid energy sample (i.e. after step 0).  Self-recurrence keeps it pinned high.  Gates X17 off during the uninitialised startup step. |
-| X17 | `Win[17,65] = 500`, `W[17,15] = -100000`, `W[17,16] = 1000`, `Win[17,66] = -1000.2` | Transient reward pulse.  Fires for exactly one step when `energy(t) > energy(t-1)` (net increase) **and** the arm (X16) is high.  Logic: `relu_tanh(500*e(t) - 100000*X15(t) + 1000*X16(t) - 1000.2)`.  The large `pulse_gain = 100000` amplifies the energy difference; the bias `-1000.2` cancels the arm gate plus a threshold of 0.2 to suppress noise. |
-| X18 | `W[18,17] = 10`, `W[18,18] = 10` | Latched is_rewarded flag.  Self-exciting latch driven by the X17 pulse.  Once triggered: `relu_tanh(10*pulse + 10*X18) ~ 1`, then `relu_tanh(0 + 10*1) ~ 1` indefinitely. |
+| X17 | `Win[17,65] = 500`, `W[17,15] = -100000`, `W[17,16] = 1000`, `Win[17,66] = -1000.2` | Reward-rise detector.  It goes high whenever `energy(t) > energy(t-1)` (net increase) **and** the arm (X16) is high.  If the bot remains on a source for several steps, X17 can stay high across that whole refill streak.  Logic: `relu_tanh(500*e(t) - 100000*X15(t) + 1000*X16(t) - 1000.2)`.  The large `pulse_gain = 100000` amplifies the energy difference; the bias `-1000.2` cancels the arm gate plus a threshold of 0.2 to suppress noise. |
+| X18 | `W[18,17] = 10`, `W[18,18] = 10` | Latched is_rewarded flag.  Self-exciting latch driven by X17.  Once triggered: `relu_tanh(10*X17 + 10*X18) ~ 1`, then `relu_tanh(0 + 10*1) ~ 1` indefinitely. |
 
 #### Reward detection timeline
 
@@ -146,9 +146,9 @@ per-neuron logic needed).
 | 0 | 0 | 0 | 0 | 0 | No prior energy stored; arm is low |
 | 1 | K*e(0) | ~1 (armed) | 0 | 0 | X16 latches high from X15; X17 blocked by bias since no energy jump |
 | ... | K*e(t-1) | ~1 | 0 | 0 | Normal operation, energy slowly decreasing |
-| t_reward | K*e(t-1) | ~1 | **pulse** | 0 | Energy jumped up (refill); X17 fires |
-| t_reward+1 | K*e(t) | ~1 | 0 | **~1** | X18 latches from pulse; X17 returns to 0 |
-| t_reward+2.. | K*e(t-1) | ~1 | 0 | ~1 | X18 stays pinned via self-recurrence |
+| t_reward | K*e(t-1) | ~1 | **high** | 0 | First positive energy jump; X17 detects the refill |
+| t_reward+1 | K*e(t) | ~1 | high or 0 | **~1** | X18 latches from X17; X17 stays high only if energy rises again |
+| t_reward+2.. | K*e(t-1) | ~1 | high or 0 | ~1 | X18 stays pinned; X17 mirrors any later positive-energy streaks |
 
 
 ## Weight matrices summary

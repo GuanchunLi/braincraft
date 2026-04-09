@@ -30,7 +30,7 @@ Internal state neurons (all with zero contribution to Wout):
 - X12: hit signal from input (relu_tanh)
 
 - X13: latched initial-heading correction (sample-and-hold)
-       At step 0 the sensor asymmetry (prox[L]-prox[R]) is used to
+       At step 0 the sensor asymmetry (prox[R]-prox[L]) is used to
        estimate the unknown +/-5 deg initial-direction noise.  The
        estimate is latched via self-recurrence and subtracted from the
        current-step sensor contribution using neuron 14.
@@ -44,7 +44,8 @@ Reward-state circuit (remapped from dummy3 X6-X9):
 
 - X15: delayed copy of scaled energy
 - X16: "armed" latch, suppresses the startup false positive
-- X17: transient reward pulse after the first net energy increase
+- X17: reward detector that stays high while energy is increasing and the
+       circuit is armed
 - X18: latched is_rewarded: 0 until first refill, then pinned at ~1
 
 The steering behavior is identical to dummy2 because Wout[0, 6:] == 0.
@@ -93,8 +94,17 @@ def make_activation(speed, wout_feature_weights):
     wout = np.asarray(wout_feature_weights, dtype=float)
 
     def f(x):
+        if x.ndim == 1:
+            is2d = False
+        elif x.ndim == 2 and x.shape[1] == 1:
+            is2d = True
+        else:
+            raise ValueError(
+                "make_activation expects shape (n,) or (n, 1); "
+                f"got {x.shape}"
+            )
+
         out = np.empty_like(x)
-        is2d = x.ndim > 1
 
         # -- Feature neurons (relu_tanh, same as dummy2) --
         out[:6] = relu_tanh(x[:6])
@@ -182,7 +192,7 @@ def make_activation(speed, wout_feature_weights):
     return f
 
 
-def dummy_player():
+def reflex_player():
     """Build a deterministic controller identical to dummy2 output,
     with internal head direction, position tracking, and reward-state
     detection."""
@@ -286,7 +296,7 @@ def dummy_player():
     W[16, 15] = arm_from_energy
     W[16, 16] = arm_latch
 
-    # X17: transient reward pulse on first energy increase
+    # X17: reward detector, high whenever energy rises while armed
     Win[17, energy_idx] = pulse_gain * K
     W[17, 15]           = -pulse_gain
     W[17, 16]           = arm_gate
@@ -314,7 +324,7 @@ if __name__ == "__main__":
     seed = 12345
     np.random.seed(seed)
     print("Training reflex player (single yield, should be instant)...")
-    model = train(dummy_player, timeout=100)
+    model = train(reflex_player, timeout=100)
 
     W_in, W, W_out, warmup, leak, f, g = model
 
