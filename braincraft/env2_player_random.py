@@ -4,8 +4,11 @@
 """
 Example and evaluation of the performances of a random player.
 """
+import numpy as np
+
 from bot import Bot
-from environment_1 import Environment
+from environment_2 import Environment
+from challenge_2 import evaluate
     
 def identity(x):
     return x
@@ -48,8 +51,7 @@ def random_player():
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     import time
-    import numpy as np    
-    from challenge_2 import train, evaluate
+    from challenge_2 import train
 
     seed = 12345
     
