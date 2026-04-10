@@ -36,6 +36,7 @@ New internal state neurons (additions to v1):
        Wout[0, 20] = -2.0  (strong right-turn override).
 """
 
+import time
 import numpy as np
 if not hasattr(np, "atan2"):
     np.atan2 = np.arctan2
@@ -55,13 +56,18 @@ def relu_tanh(x):
 
 
 # --------------- Shortcut circuit parameters --------------------------------
-SHORTCUT_TURN    = -2.0    # Wout weight: strong right turn
+SHORTCUT_TURN    = -2.0    # Turn magnitude (saturates to max rate for tightest arc)
 SIN_HORIZ_THR   = 0.35    # |sin| < this  => heading "horizontal"
 SIN_VERT_THR    = 0.70    # |sin| > this  => heading "vertical" (counter reset)
-SIN_MAINTAIN_THR = 0.50   # latch release (~30 deg turn, less corridor drift)
 COUNTER_THR     = 60      # min steps before shortcut can trigger
-NEAR_CENTER_THR = 0.12    # |X10 - offset| < this  => near corridor
-DRIFT_OFFSET    = 0.05    # pre-shift trigger opposite to travel direction
+NEAR_CENTER_THR = 0.05    # |X10 - offset| < this (tight for arc precision)
+DRIFT_OFFSET    = 0.115   # arc radius compensation (speed/max_turn_rate)
+CORRIDOR_GAIN   = 5.0     # centering gain during corridor traversal
+CORRIDOR_SIN_THR = 0.30   # |sin| > this => apply centering in corridor
+CORRIDOR_STEPS  = 120     # max steps X21 stays active after shortcut fires
+TURN_STEPS      = 18      # steps at max turn rate (~90° turn)
+APPROACH_STEPS  = 45      # straight-line approach + corridor traverse
+SC_TOTAL        = TURN_STEPS + APPROACH_STEPS  # total shortcut countdown
 # ----------------------------------------------------------------------------
 
 
@@ -143,30 +149,80 @@ def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
             counter = x19_val + 1.0    # increment
         _s(out, 19, counter)
 
-        # === Shortcut steering X20 (latched) ===
+        # === Shortcut steering X20 ===
+        # X20 is used as BOTH a countdown timer AND the steering override value.
+        # We track the countdown in a separate internal variable (X22).
+        # X20 value is added to the ESN output via Wout[0,20]=1.0.
+        #   Turn phase:    X20 = ±|SHORTCUT_TURN| (saturates output to max turn)
+        #   Approach phase: X20 = -O_features (cancels wall-following → go straight)
+        #   Normal:        X20 = 0 (no effect)
         is_rewarded   = _g(out, 18) > 0.5
         heading_horiz = abs(sin_lagged) < SIN_HORIZ_THR
         front_clear   = _g(out, 5) < 0.1
         enough_steps  = x19_val > COUNTER_THR
-        # Direction-aware trigger: offset opposite to travel to compensate
-        # for lateral drift during the turn
         cos_lagged = np.cos(theta_lagged)
         trig_offset = -DRIFT_OFFSET * np.sign(cos_lagged) if abs(cos_lagged) > 0.5 else 0.0
         near_corr   = abs(x10_prev - trig_offset) < NEAR_CENTER_THR
 
-        x20_prev = _g(x, 20)          # previous latch state
+        # Use X22 as countdown timer for the shortcut phases
+        x22_prev = _g(x, 22) if x.shape[0] > 22 else 0.0
         trigger  = (is_rewarded and heading_horiz and front_clear
-                    and enough_steps and near_corr)
-        maintain = x20_prev > 0.5 and abs(sin_lagged) < SIN_MAINTAIN_THR
+                    and enough_steps and near_corr and x22_prev < 0.5)
 
-        sc_val = 1.0 if (trigger or maintain) else 0.0
-        _s(out, 20, sc_val)
-
-        # === Compute dtheta including shortcut contribution ===
-        if is2d:
-            O_now = float(wout @ out[:6, 0]) + wout_sc * sc_val
+        if trigger:
+            sc_countdown = float(SC_TOTAL)
+        elif x22_prev > 0.5:
+            sc_countdown = x22_prev - 1.0
         else:
-            O_now = float(wout @ out[:6]) + wout_sc * sc_val
+            sc_countdown = 0.0
+
+        is_turning    = sc_countdown > float(APPROACH_STEPS) + 0.5
+        is_approaching = sc_countdown > 0.5 and not is_turning
+
+        # === Dynamic turn direction ===
+        x11_prev = _g(x, 11)
+        turn_toward = -np.sign(cos_lagged) * np.sign(x11_prev) if abs(x11_prev) > 0.01 else -1.0
+
+        # === Compute O_features (wall-following output from feature neurons) ===
+        if is2d:
+            O_features = float(wout @ out[:6, 0])
+            O_no_front = float(wout[:5] @ out[:5, 0])  # exclude front-block X5
+        else:
+            O_features = float(wout @ out[:6])
+            O_no_front = float(wout[:5] @ out[:5])      # exclude front-block X5
+
+        # Store countdown in X22
+        _s(out, 22, sc_countdown)
+
+        # === Corridor-active countdown X21 ===
+        x21_prev = _g(x, 21)
+        if sc_countdown > 0.5:
+            corr_val = float(CORRIDOR_STEPS)
+        elif x21_prev > 0.5:
+            corr_val = x21_prev - 1.0
+        else:
+            corr_val = 0.0
+        _s(out, 21, corr_val)
+
+        # === Corridor centering correction ===
+        centering = 0.0
+        if corr_val > 0.5 and abs(sin_lagged) > CORRIDOR_SIN_THR:
+            x3_pre = _g(x, 3)
+            x4_pre = _g(x, 4)
+            prox_diff = x3_pre - x4_pre
+            centering = CORRIDOR_GAIN * sin_lagged * prox_diff
+
+        # === Set X20 (steering override, added to O via Wout[0,20]=1.0) ===
+        if is_turning:
+            x20_val = abs(SHORTCUT_TURN) * turn_toward  # ±2.0 → saturates
+        elif is_approaching:
+            x20_val = -O_no_front  # cancel heading/safety but keep front-block active
+        else:
+            x20_val = 0.0
+        _s(out, 20, x20_val)
+
+        # === Compute O_now (for internal heading tracking) ===
+        O_now = O_features + x20_val
         dtheta_now = np.clip(O_now, -a, a)
         _s(out, 6, dtheta_now)
 
@@ -193,9 +249,10 @@ def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
         _s(out, 13, hold_val)
         _s(out, 14, x14)              # identity pass-through
 
-        # === Remaining neurons X21-X999 (relu_tanh, all zero) ===
-        if x.shape[0] > 21:
-            out[21:] = relu_tanh(x[21:])
+        # === Remaining neurons X22-X999 (relu_tanh, all zero) ===
+        # X21 is set above (corridor-active latch), skip it here.
+        if x.shape[0] > 23:
+            out[23:] = relu_tanh(x[23:])
 
         return out
 
@@ -308,14 +365,21 @@ def reflex2_player():
     # X19: step counter (self-recurrence; logic in activation)
     W[19, 19] = 1.0
 
-    # X20: shortcut steering latch (self-recurrence; logic in activation)
+    # X20: shortcut steering override (self-recurrence; value set in activation)
+    # Wout[0,20]=1.0 → X20 value directly adds to output steering.
+    # Activation sets X20 = ±2.0 (turn), -O_features (approach), or 0 (normal).
     W[20, 20] = 1.0
-    Wout[0, 20] = SHORTCUT_TURN
+    Wout[0, 20] = 1.0
+
+    # X21: corridor-active latch (self-recurrence; logic in activation)
+    W[21, 21] = 1.0
+
+    # X22: shortcut countdown timer (self-recurrence; logic in activation)
+    W[22, 22] = 1.0
 
     # Build custom activation with all relevant weights baked in
     wout_features = Wout[0, :6].copy()
-    f = make_activation(speed, wout_features,
-                        wout_shortcut_weight=SHORTCUT_TURN)
+    f = make_activation(speed, wout_features)
 
     model = Win, W, Wout, warmup, leak, f, g
     yield model
@@ -323,7 +387,7 @@ def reflex2_player():
 
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    from challenge_1 import train
+    from challenge_1 import train, evaluate
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -334,6 +398,13 @@ if __name__ == "__main__":
     model = train(reflex2_player, timeout=100)
 
     W_in, W, W_out, warmup, leak, f, g = model
+
+    # Evaluation
+    start_time = time.time()
+    score, std = evaluate(model, Bot, Environment, debug=False, seed=seed)
+    elapsed = time.time() - start_time
+    print(f"Evaluation completed after {elapsed:.2f} seconds")
+    print(f"Final score: {score:.2f} ± {std:.2f}")
 
     # Run validation on multiple seeds
     np.random.seed(seed)
