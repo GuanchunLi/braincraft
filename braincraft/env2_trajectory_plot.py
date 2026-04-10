@@ -19,13 +19,14 @@ from bot import Bot
 from environment_2 import Environment
 
 
-DEFAULT_MODELS = ["reflex2"]
+DEFAULT_MODELS = ["reflex3"]
 DEFAULT_SEEDS = [12345, 1, 2, 7]
 
 
 PLAYERS = {
     "random":  ("env2_player_random", "random_player"),
     "reflex2": ("env2_player_reflex2", "reflex2_player"),
+    "reflex3": ("env2_player_reflex3", "reflex3_player")
 }
 
 
