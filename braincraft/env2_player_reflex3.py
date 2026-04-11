@@ -1,70 +1,88 @@
-# Braincraft challenge — Reflex Player v3 adapted for Environment 2
+# Braincraft challenge - Reflex Player v3 adapted for Environment 2
 # Copyright (C) 2025 Nicolas P. Rougier
 # Released under the GNU General Public License 3
 
 """
 Reflex Player v3 for Environment 2.
 
-Same as reflex player v2, but the sign of front_gain is determined
-dynamically from the initial color observation: if the bot sees a
-non-colored wall on the left and a blue wall on the right, front_gain
-is positive (np.radians(20.0)); vice versa, it is negative.
+This keeps the reflex2 wall-following, initial heading correction, and
+corridor shortcut behavior intact. The only behavioral change is how the
+front-block steering gain is signed:
 
-This allows the bot to adapt its wall-following direction to the
-environment layout, rather than using a fixed sign.
+* reflex2: fixed front_gain = -np.radians(20.0)
+* reflex3: front_gain sign is latched from early color evidence
+
+Because the bot starts with a small random heading jitter, the blue wall is
+not always visible on the very first camera frame. Reflex3 therefore gathers
+evidence during the initial few activations and latches the sign as soon as
+the side choice is unambiguous. Before that latch, the front-block term is
+held at zero.
 """
 
-import time
 import numpy as np
+
 if not hasattr(np, "atan2"):
     np.atan2 = np.arctan2
 
 from bot import Bot
 from environment_2 import Environment
+import env2_player_reflex2 as reflex2
 
 
-def identity(x):
-    return x
+identity = reflex2.identity
+relu_tanh = reflex2.relu_tanh
 
 
-def relu_tanh(x):
-    """Thresholded activation used for sparse hand-crafted feature neurons."""
-    x = np.tanh(x)
-    return np.where(x > 0, x, 0)
+COLOR_COPY_START = 25
+BLUE_WALL_VALUE = 4.0
+COLOR_EVIDENCE_THRESHOLD = 2.0
+FRONT_GAIN_MAG = np.radians(20.0)
+DEFAULT_SPEED = 0.01
 
 
-# --------------- Shortcut circuit parameters --------------------------------
-SHORTCUT_TURN    = -2.0    # Turn magnitude (saturates to max rate for tightest arc)
-SIN_HORIZ_THR   = 0.35    # |sin| < this  => heading "horizontal"
-SIN_VERT_THR    = 0.70    # |sin| > this  => heading "vertical" (counter reset)
-COUNTER_THR     = 60      # min steps before shortcut can trigger
-NEAR_CENTER_THR = 0.05    # |X10 - offset| < this (tight for arc precision)
-DRIFT_OFFSET    = 0.115   # arc radius compensation (speed/max_turn_rate)
-CORRIDOR_GAIN   = 5.0     # centering gain during corridor traversal
-CORRIDOR_SIN_THR = 0.30   # |sin| > this => apply centering in corridor
-CORRIDOR_STEPS  = 120     # max steps X21 stays active after shortcut fires
-TURN_STEPS      = 18      # steps at max turn rate (~90° turn)
-APPROACH_STEPS  = 45      # straight-line approach + corridor traverse
-SC_TOTAL        = TURN_STEPS + APPROACH_STEPS  # total shortcut countdown
-# ----------------------------------------------------------------------------
+def _reflex3_indices(n_rays):
+    color_copy_stop = COLOR_COPY_START + n_rays
+    left_blue_idx = color_copy_stop
+    right_blue_idx = left_blue_idx + 1
+    evidence_idx = right_blue_idx + 1
+    front_sign_idx = evidence_idx + 1
+    signed_front_idx = front_sign_idx + 1
+    return (
+        color_copy_stop,
+        left_blue_idx,
+        right_blue_idx,
+        evidence_idx,
+        front_sign_idx,
+        signed_front_idx,
+    )
 
 
-def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
-    """Build a custom per-neuron activation with direction/position tracking,
-    reward detection, and shortcut steering.
+def make_activation(
+    speed,
+    wout_feature_weights,
+    front_gain_mag,
+    n_rays,
+    wout_shortcut_weight=0.0,
+):
+    """Custom activation for reflex3.
 
-    Parameters
-    ----------
-    speed : float
-        Bot speed (0.01).
-    wout_feature_weights : array, shape (6,)
-        Wout[0, 0:6] — output weights for the 6 feature neurons.
-    wout_shortcut_weight : float
-        Wout[0, 20] — output weight for the shortcut steering neuron.
+    This is the reflex2 activation with one targeted change: the front-block
+    contribution is routed through a latched sign chosen from early color
+    evidence instead of a fixed sign in Wout[0, 5].
     """
-    a = np.radians(5)  # +/-5 degrees clamp limit
+
+    a = np.radians(5)
     wout = np.asarray(wout_feature_weights, dtype=float)
-    wout_sc = float(wout_shortcut_weight)
+    _ = float(wout_shortcut_weight)
+
+    (
+        color_copy_stop,
+        left_blue_idx,
+        right_blue_idx,
+        evidence_idx,
+        front_sign_idx,
+        signed_front_idx,
+    ) = _reflex3_indices(n_rays)
 
     def f(x):
         if x.ndim == 1:
@@ -77,7 +95,6 @@ def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
                 f"got {x.shape}"
             )
 
-        # Helpers for indexing into 1D or (n,1) arrays
         def _g(arr, i):
             return float(arr[i, 0]) if is2d else float(arr[i])
 
@@ -89,149 +106,187 @@ def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
 
         out = np.empty_like(x)
 
-        # === Feature neurons X0-X5 (relu_tanh, drive output) ===
+        # X0-X5: same reflex features as reflex2.
         out[:6] = relu_tanh(x[:6])
 
-        # === Color-based front_gain sign (X23=left color, X24=right color, X25=latch) ===
-        val7_pre = _g(x, 7)
-        x25_prev = _g(x, 25)
-        if abs(val7_pre) < 1e-8 and abs(x25_prev) < 0.5:
-            # Step 0: determine sign from color observation
-            left_color  = _g(x, 23)   # sum of left-side color values
-            right_color = _g(x, 24)   # sum of right-side color values
-            if right_color > left_color:
-                color_sign = 1.0      # blue on right → positive front_gain
-            else:
-                color_sign = -1.0     # blue on left  → negative front_gain
-            _s(out, 25, color_sign)
-        else:
-            # Step 1+: keep latched sign
-            color_sign = x25_prev
-            _s(out, 25, color_sign)
-
-        # Flip front-block activation by the latched sign
-        if is2d:
-            out[5, 0] = float(out[5, 0]) * color_sign
-        else:
-            out[5] = float(out[5]) * color_sign
-
-        # === Hit signal X12 (relu_tanh, for position gating) ===
+        # X12: hit signal.
         out[12:13] = relu_tanh(x[12:13])
 
-        # === Reward circuit X15-X18 (relu_tanh) ===
+        # X15-X18: reward circuit.
         out[15:19] = relu_tanh(x[15:19])
 
-        # === Lagged direction (from previous steps, before current turn) ===
-        val7 = _g(x, 7)   # cumulative dtheta (1-step lag)
-        x13  = _g(x, 13)
-        x14  = _g(x, 14)
+        # Early color evidence for the front-block sign latch.
+        if is2d:
+            raw_colors = x[COLOR_COPY_START:color_copy_stop, 0]
+        else:
+            raw_colors = x[COLOR_COPY_START:color_copy_stop]
+
+        half = n_rays // 2
+        left_blue = bool(np.any(np.isclose(raw_colors[:half], BLUE_WALL_VALUE)))
+        right_blue = bool(np.any(np.isclose(raw_colors[half:], BLUE_WALL_VALUE)))
+
+        left_evidence = 1.0 if left_blue and not right_blue else 0.0
+        right_evidence = 1.0 if right_blue and not left_blue else 0.0
+        _s(out, left_blue_idx, left_evidence)
+        _s(out, right_blue_idx, right_evidence)
+
+        evidence_prev = _g(x, evidence_idx)
+        front_sign_prev = _g(x, front_sign_idx)
+        if abs(front_sign_prev) < 0.5:
+            evidence_now = evidence_prev + right_evidence - left_evidence
+            if evidence_now >= COLOR_EVIDENCE_THRESHOLD:
+                front_sign = 1.0
+            elif evidence_now <= -COLOR_EVIDENCE_THRESHOLD:
+                front_sign = -1.0
+            else:
+                front_sign = 0.0
+        else:
+            evidence_now = evidence_prev
+            front_sign = front_sign_prev
+
+        _s(out, evidence_idx, evidence_now)
+        _s(out, front_sign_idx, front_sign)
+        _s(out, signed_front_idx, front_sign * _g(out, 5))
+
+        # Same lagged heading state as reflex2.
+        val7 = _g(x, 7)
+        x13 = _g(x, 13)
+        x14 = _g(x, 14)
 
         if abs(val7) < 1e-8:
-            # Step 0: sample correction from sensor asymmetry
             correction = x13
-            hold_val   = x13
+            hold_val = x13
         else:
-            # Step 1+: recover latched correction
             correction = x13 - x14
-            hold_val   = correction
+            hold_val = correction
 
         theta_lagged = val7 + np.pi / 2 + correction
         sin_lagged = np.sin(theta_lagged)
 
-        # === Step counter X19 ===
-        x10_prev = _g(x, 10)          # previous x-displacement
-        x19_val  = _g(x, 19)          # previous counter value
-        near_center  = abs(x10_prev) < NEAR_CENTER_THR
-        heading_vert = abs(sin_lagged) > SIN_VERT_THR
+        # Initial heading correction X23/X24 from reflex2.
+        x23_prev = _g(x, 23)
+        x24_prev = _g(x, 24)
+
+        if x24_prev < 0.5:
+            init_remaining = float(
+                np.clip(-correction, -reflex2.INIT_CORR_CAP, reflex2.INIT_CORR_CAP)
+            )
+            init_dtheta = 0.0
+            init_correction_active = False
+            x23_new = init_remaining
+        else:
+            init_remaining = x23_prev
+            if abs(init_remaining) > reflex2.INIT_CORR_EPS:
+                init_dtheta = float(np.clip(init_remaining, -a, a))
+                init_correction_active = True
+                x23_new = init_remaining - init_dtheta
+            else:
+                init_dtheta = 0.0
+                init_correction_active = False
+                x23_new = 0.0
+
+        _s(out, 23, x23_new)
+        _s(out, 24, 1.0)
+
+        # Step counter X19.
+        x10_prev = _g(x, 10)
+        x19_val = _g(x, 19)
+        near_center = abs(x10_prev) < reflex2.NEAR_CENTER_THR
+        heading_vert = abs(sin_lagged) > reflex2.SIN_VERT_THR
 
         if near_center and heading_vert:
-            counter = 0.0              # in the corridor — reset
+            counter = 0.0
         else:
-            counter = x19_val + 1.0    # increment
+            counter = x19_val + 1.0
         _s(out, 19, counter)
 
-        # === Shortcut steering X20 ===
-        is_rewarded   = _g(out, 18) > 0.5
-        heading_horiz = abs(sin_lagged) < SIN_HORIZ_THR
-        front_clear   = abs(_g(out, 5)) < 0.1
-        enough_steps  = x19_val > COUNTER_THR
+        # Shortcut steering X20.
+        is_rewarded = _g(out, 18) > 0.5
+        heading_horiz = abs(sin_lagged) < reflex2.SIN_HORIZ_THR
+        front_clear = _g(out, 5) < 0.1
+        enough_steps = x19_val > reflex2.COUNTER_THR
         cos_lagged = np.cos(theta_lagged)
-        trig_offset = -DRIFT_OFFSET * np.sign(cos_lagged) if abs(cos_lagged) > 0.5 else 0.0
-        near_corr   = abs(x10_prev - trig_offset) < NEAR_CENTER_THR
+        if abs(cos_lagged) > 0.5:
+            trig_offset = -reflex2.DRIFT_OFFSET * np.sign(cos_lagged)
+        else:
+            trig_offset = 0.0
+        near_corr = abs(x10_prev - trig_offset) < reflex2.NEAR_CENTER_THR
 
-        # Use X22 as countdown timer for the shortcut phases
         x22_prev = _g(x, 22) if x.shape[0] > 22 else 0.0
-        trigger  = (is_rewarded and heading_horiz and front_clear
-                    and enough_steps and near_corr and x22_prev < 0.5)
+        trigger = (
+            is_rewarded
+            and heading_horiz
+            and front_clear
+            and enough_steps
+            and near_corr
+            and x22_prev < 0.5
+        )
 
         if trigger:
-            sc_countdown = float(SC_TOTAL)
+            sc_countdown = float(reflex2.SC_TOTAL)
         elif x22_prev > 0.5:
             sc_countdown = x22_prev - 1.0
         else:
             sc_countdown = 0.0
 
-        is_turning    = sc_countdown > float(APPROACH_STEPS) + 0.5
+        is_turning = sc_countdown > float(reflex2.APPROACH_STEPS) + 0.5
         is_approaching = sc_countdown > 0.5 and not is_turning
 
-        # === Dynamic turn direction ===
         x11_prev = _g(x, 11)
-        turn_toward = -np.sign(cos_lagged) * np.sign(x11_prev) if abs(x11_prev) > 0.01 else -1.0
-
-        # === Compute O_features (wall-following output from feature neurons) ===
-        if is2d:
-            O_features = float(wout @ out[:6, 0])
-            O_no_front = float(wout[:5] @ out[:5, 0])  # exclude front-block X5
+        if abs(x11_prev) > 0.01:
+            turn_toward = -np.sign(cos_lagged) * np.sign(x11_prev)
         else:
-            O_features = float(wout @ out[:6])
-            O_no_front = float(wout[:5] @ out[:5])      # exclude front-block X5
+            turn_toward = -1.0
 
-        # Store countdown in X22
+        if is2d:
+            O_main = float(wout @ out[:6, 0])
+            O_no_front = float(wout[:5] @ out[:5, 0])
+        else:
+            O_main = float(wout @ out[:6])
+            O_no_front = float(wout[:5] @ out[:5])
+        O_features = O_main + front_gain_mag * _g(out, signed_front_idx)
+
         _s(out, 22, sc_countdown)
 
-        # === Corridor-active countdown X21 ===
         x21_prev = _g(x, 21)
         if sc_countdown > 0.5:
-            corr_val = float(CORRIDOR_STEPS)
+            corr_val = float(reflex2.CORRIDOR_STEPS)
         elif x21_prev > 0.5:
             corr_val = x21_prev - 1.0
         else:
             corr_val = 0.0
         _s(out, 21, corr_val)
 
-        # === Corridor centering correction ===
-        centering = 0.0
-        if corr_val > 0.5 and abs(sin_lagged) > CORRIDOR_SIN_THR:
+        if corr_val > 0.5 and abs(sin_lagged) > reflex2.CORRIDOR_SIN_THR:
             x3_pre = _g(x, 3)
             x4_pre = _g(x, 4)
             prox_diff = x3_pre - x4_pre
-            centering = CORRIDOR_GAIN * sin_lagged * prox_diff
+            centering = reflex2.CORRIDOR_GAIN * sin_lagged * prox_diff
+        else:
+            centering = 0.0
 
-        # === Set X20 (steering override, added to O via Wout[0,20]=1.0) ===
-        if is_turning:
-            x20_val = abs(SHORTCUT_TURN) * turn_toward  # ±2.0 → saturates
+        if init_correction_active:
+            x20_val = init_dtheta - O_features
+        elif is_turning:
+            x20_val = abs(reflex2.SHORTCUT_TURN) * turn_toward
         elif is_approaching:
-            x20_val = -O_no_front  # cancel heading/safety but keep front-block active
+            x20_val = -O_no_front
         else:
             x20_val = 0.0
         _s(out, 20, x20_val)
 
-        # === Compute O_now (for internal heading tracking) ===
         O_now = O_features + x20_val
         dtheta_now = np.clip(O_now, -a, a)
         _s(out, 6, dtheta_now)
 
-        # === Direction accumulator X7 (identity) ===
-        out[7:8] = x[7:8]             # pass-through lagged sum
+        out[7:8] = x[7:8]
 
-        # === Zero-lag direction with correction ===
         theta_now = val7 + np.pi / 2 + correction + dtheta_now
         cos_now = np.cos(theta_now)
         sin_now = np.sin(theta_now)
         _s(out, 8, cos_now)
         _s(out, 9, sin_now)
 
-        # === Position accumulators X10-X11 (gated by hit) ===
         hit_val = _g(x, 12)
         if hit_val < 0.5:
             _s(out, 10, _g(x, 10) + speed * cos_now)
@@ -240,19 +295,14 @@ def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
             _s(out, 10, _g(x, 10))
             _s(out, 11, _g(x, 11))
 
-        # === Correction neurons X13-X14 ===
         _s(out, 13, hold_val)
-        _s(out, 14, x14)              # identity pass-through
+        _s(out, 14, x14)
 
-        # === Color detector neurons X23-X24 (pass-through, used at step 0) ===
-        _s(out, 23, _g(x, 23))
-        _s(out, 24, _g(x, 24))
-        # X25 is set above (color sign latch)
+        # Preserve raw color copies for this activation; no recurrence needed.
+        out[COLOR_COPY_START:color_copy_stop] = x[COLOR_COPY_START:color_copy_stop]
 
-        # === Remaining neurons X26-X999 (relu_tanh, all zero) ===
-        # X21 is set above (corridor-active latch), skip it here.
-        if x.shape[0] > 26:
-            out[26:] = relu_tanh(x[26:])
+        if x.shape[0] > signed_front_idx + 1:
+            out[signed_front_idx + 1 :] = relu_tanh(x[signed_front_idx + 1 :])
 
         return out
 
@@ -260,280 +310,54 @@ def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
 
 
 def reflex3_player():
-    """Build reflex player v3 for env2 — wall-following with dynamic front_gain
-    sign based on initial color observation.
+    """Build reflex player v3 for env2.
 
-    Same as reflex2, except front_gain sign is determined at step 0 by
-    comparing left-side vs right-side color values from the camera.
+    The network is reflex2 plus a small early-evidence latch that chooses the
+    sign of the front-block steering term and keeps it fixed for the run.
     """
 
-    bot = Bot()
+    Win, W, Wout, warmup, leak, _f, g = next(reflex2.reflex2_player())
+    Win = Win.copy()
+    W = W.copy()
+    Wout = Wout.copy()
 
-    n = 1000
-    p = bot.camera.resolution   # 64
-    warmup = 0
-    leak = 1.0
-    g = identity
+    n_rays = (Win.shape[1] - 3) // 2
+    speed = DEFAULT_SPEED
 
-    # env2 input: 2*p+3 = 131 (64 depths + 64 colors + hit + energy + bias)
-    n_inputs = 2 * p + 3
-    Win  = np.zeros((n, n_inputs))
-    W    = np.zeros((n, n))
-    Wout = np.zeros((1, n))
+    (
+        color_copy_stop,
+        _left_blue_idx,
+        _right_blue_idx,
+        evidence_idx,
+        front_sign_idx,
+        signed_front_idx,
+    ) = _reflex3_indices(n_rays)
 
-    # Input indices for env2 (depths 0..63, colors 64..127, then hit/energy/bias)
-    hit_idx    = 2 * p          # 128
-    energy_idx = 2 * p + 1      # 129
-    bias_idx   = 2 * p + 2      # 130
+    # Copy the raw color wall ids into unused neurons so the activation can
+    # read the exact early observation directly.
+    for ray_idx in range(n_rays):
+        Win[COLOR_COPY_START + ray_idx, n_rays + ray_idx] = 1.0
 
-    speed = bot.speed       # 0.01
+    # Evidence accumulator and sign latch.
+    W[evidence_idx, evidence_idx] = 1.0
+    W[front_sign_idx, front_sign_idx] = 1.0
 
-    # ===== Feature neurons (identical to reflex v1) ==========================
-    # Ray indices are the same (0..63 = depth channels)
-    L_idx          = 20
-    R_idx          = 63 - L_idx          # 43
-    left_side_idx  = 11
-    right_side_idx = 63 - left_side_idx  # 52
+    # Remove the fixed front_gain on X5 and replace it with a signed copy.
+    Wout[0, 5] = 0.0
+    Wout[0, signed_front_idx] = FRONT_GAIN_MAG
 
-    Win[0, hit_idx]        = 1.0           # X0: hit
-    Win[1, L_idx]          = 1.0           # X1: prox[L]
-    Win[2, R_idx]          = 1.0           # X2: prox[R]
-    Win[3, left_side_idx]  = -1.0          # X3: safety L
-    Win[4, right_side_idx] = -1.0          # X4: safety R
-
-    C1_idx, C2_idx = 31, 32
-    front_thr      = 1.4
-    Win[5, C1_idx]   = 1.0
-    Win[5, C2_idx]   = 1.0
-    Win[5, bias_idx] = -front_thr          # X5: front-block
-
-    TANH1 = np.tanh(1.0)
-
-    # ===== Gains (identical to reflex v1) ====================================
-    hit_turn          = np.radians(-10.0) / TANH1
-    heading_gain      = np.radians(-40)
-    safety_gain_left  = np.radians(-20.0)
-    safety_gain_right = -safety_gain_left
-    safety_target     = 0.75
-    Win[3, bias_idx]  = safety_target
-    Win[4, bias_idx]  = safety_target
-    front_gain        = np.radians(20.0)   # magnitude; sign set dynamically
-
-    Wout[0, 0] = hit_turn
-    Wout[0, 1] = heading_gain
-    Wout[0, 2] = -heading_gain
-    Wout[0, 3] = safety_gain_left
-    Wout[0, 4] = safety_gain_right
-    Wout[0, 5] = front_gain
-
-    # ===== Internal state neurons (same as reflex v1) ========================
-    # X6:  current clamped dtheta (computed in activation)
-    # X7:  direction accumulator
-    W[7, 7] = 1.0
-    W[7, 6] = 1.0
-
-    # X8, X9: cos/sin (computed in activation)
-    # X10, X11: position accumulators
-    W[10, 10] = 1.0
-    W[11, 11] = 1.0
-
-    # X12: hit signal
-    Win[12, hit_idx] = 1.0
-
-    # X13: latched heading correction (sample-and-hold)
-    cal_gain = 1.0 / 0.173
-    W[13, 13]       =  1.0
-    Win[13, L_idx]  = -cal_gain
-    Win[13, R_idx]  =  cal_gain
-
-    # X14: instantaneous sensor contribution (no recurrence)
-    Win[14, L_idx]  = -cal_gain
-    Win[14, R_idx]  =  cal_gain
-
-    # ===== Reward circuit (same as reflex v1) ================================
-    K              = 0.005
-    arm_from_energy = 1000.0
-    arm_latch      = 10.0
-    pulse_gain     = 100000.0
-    pulse_thr      = 0.2
-    arm_gate       = 1000.0
-    latch_gain     = 10.0
-
-    Win[15, energy_idx] = K
-    W[16, 15] = arm_from_energy
-    W[16, 16] = arm_latch
-    Win[17, energy_idx] = pulse_gain * K
-    W[17, 15]           = -pulse_gain
-    W[17, 16]           = arm_gate
-    Win[17, bias_idx]   = -(arm_gate + pulse_thr)
-    W[18, 17] = latch_gain
-    W[18, 18] = latch_gain
-
-    # ===== NEW: Shortcut circuit =============================================
-    # X19: step counter (self-recurrence; logic in activation)
-    W[19, 19] = 1.0
-
-    # X20: shortcut steering override (self-recurrence; value set in activation)
-    W[20, 20] = 1.0
-    Wout[0, 20] = 1.0
-
-    # X21: corridor-active latch (self-recurrence; logic in activation)
-    W[21, 21] = 1.0
-
-    # X22: shortcut countdown timer (self-recurrence; logic in activation)
-    W[22, 22] = 1.0
-
-    # ===== NEW in v3: Color detection for dynamic front_gain sign ============
-    # X23: left-side color sum (extreme left camera rays)
-    for i in [0, 1, 2, 3, 4]:
-        Win[23, p + i] = 1.0       # color input index = p + ray_index
-    # X24: right-side color sum (extreme right camera rays)
-    for i in [59, 60, 61, 62, 63]:
-        Win[24, p + i] = 1.0
-    # X25: latched sign (+1 or -1, self-recurrence preserves across steps)
-    W[25, 25] = 1.0
-
-    # Build custom activation with all relevant weights baked in
     wout_features = Wout[0, :6].copy()
-    f = make_activation(speed, wout_features)
+    f = make_activation(speed, wout_features, FRONT_GAIN_MAG, n_rays)
 
     model = Win, W, Wout, warmup, leak, f, g
     yield model
 
 
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    from challenge_2 import train, evaluate
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    from challenge_2 import evaluate
 
-    seed = 12345
-    np.random.seed(seed)
-    print("Training reflex3 player for env2 (single yield, instant)...")
-    model = train(reflex3_player, timeout=100)
-
-    W_in, W, W_out, warmup, leak, f, g = model
-
-    # Evaluation
-    start_time = time.time()
-    score, std = evaluate(model, Bot, Environment, debug=False, seed=seed)
-    elapsed = time.time() - start_time
-    print(f"Evaluation completed after {elapsed:.2f} seconds")
-    print(f"Final score (distance): {score:.2f} +/- {std:.2f}")
-
-    # Run validation on multiple seeds
-    np.random.seed(seed)
-    seeds = np.random.randint(0, 1_000_000, 4)
-
-    fig, axes = plt.subplots(4, 5, figsize=(25, 16))
-    fig.suptitle("Reflex Player v3 (env2) — validation", fontsize=13)
-
-    for run_idx, s in enumerate(seeds):
-        np.random.seed(s)
-        environment = Environment()
-        bot = Bot()
-
-        n_cam = bot.camera.resolution
-        # env2 input: 2*n_cam + 3
-        I = np.zeros((2 * n_cam + 3, 1))
-        X = np.zeros((1000, 1))
-
-        bot.camera.update(bot.position, bot.direction,
-                          environment.world, environment.colormap)
-
-        true_pos = [np.array(bot.position, dtype=float)]
-        energy_history = [bot.energy]
-        reward_flags = [0.0]
-        shortcut_flags = [0.0]
-        counter_vals = [0.0]
-
-        iteration = 0
-        n_hits = 0
-        distance = 0.0
-        while bot.energy > 0:
-            I[:n_cam, 0] = 1 - bot.camera.depths
-            I[n_cam:2*n_cam, 0] = bot.camera.values
-            I[2*n_cam:, 0] = bot.hit, bot.energy, 1.0
-            X = (1 - leak) * X + leak * f(np.dot(W_in, I) + np.dot(W, X))
-            O = np.dot(W_out, g(X))
-
-            if iteration > warmup:
-                p_prev = np.array(bot.position, dtype=float)
-                bot.forward(O, environment, debug=False)
-                distance += np.linalg.norm(p_prev - bot.position)
-                n_hits += bot.hit
-
-            true_pos.append(np.array(bot.position, dtype=float))
-            energy_history.append(bot.energy)
-            reward_flags.append(float(X[18, 0]))
-            shortcut_flags.append(float(X[20, 0]))
-            counter_vals.append(float(X[19, 0]))
-            iteration += 1
-
-        true_pos = np.array(true_pos)
-        energy_history = np.array(energy_history)
-        reward_flags = np.array(reward_flags)
-        shortcut_flags = np.array(shortcut_flags)
-        counter_vals = np.array(counter_vals)
-
-        print(f"\nRun {run_idx} (seed={s}): {iteration} steps, "
-              f"dist={distance:.2f}, {n_hits} hits, reward={float(X[18,0]):.2f}")
-
-        # --- Plot: trajectory on world map ---
-        ax = axes[run_idx, 0]
-        extent = [0, 1, 0, 1]
-        ax.imshow(environment.world_rgb, origin="lower", extent=extent,
-                  interpolation="nearest")
-        t = np.linspace(0, 1, len(true_pos))
-        ax.scatter(true_pos[:, 0], true_pos[:, 1], c=t, cmap="viridis",
-                   s=1, zorder=10)
-        ax.plot(true_pos[0, 0], true_pos[0, 1], "o", color="lime",
-                markersize=8, markeredgecolor="black", zorder=20)
-        ax.plot(true_pos[-1, 0], true_pos[-1, 1], "X", color="red",
-                markersize=8, markeredgecolor="black", zorder=20)
-        sc_on = np.where(np.diff(shortcut_flags) > 0.5)[0] + 1
-        if len(sc_on):
-            ax.scatter(true_pos[sc_on, 0], true_pos[sc_on, 1],
-                       marker="v", color="magenta", s=60, zorder=25,
-                       label="shortcut")
-            ax.legend(fontsize=7)
-        ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-        ax.set_aspect("equal")
-        ax.set_title(f"Run {run_idx}  seed={s}", fontsize=9)
-
-        # --- Plot: energy ---
-        ax = axes[run_idx, 1]
-        ax.plot(energy_history, linewidth=0.8, color="C2")
-        ax.set_ylabel("Energy")
-        ax.set_title("Energy", fontsize=9)
-        ax.grid(True, alpha=0.3)
-
-        # --- Plot: reward flag ---
-        ax = axes[run_idx, 2]
-        ax.plot(reward_flags, linewidth=0.8, color="C3")
-        ax.set_ylim(-0.1, 1.2)
-        ax.set_ylabel("X18")
-        ax.set_title("Reward flag", fontsize=9)
-        ax.grid(True, alpha=0.3)
-
-        # --- Plot: shortcut flag ---
-        ax = axes[run_idx, 3]
-        ax.plot(shortcut_flags, linewidth=0.8, color="C4")
-        ax.set_ylim(-0.1, 1.2)
-        ax.set_ylabel("X20")
-        ax.set_title("Shortcut active", fontsize=9)
-        ax.grid(True, alpha=0.3)
-
-        # --- Plot: step counter ---
-        ax = axes[run_idx, 4]
-        ax.plot(counter_vals, linewidth=0.8, color="C5")
-        ax.axhline(COUNTER_THR, color="red", linestyle="--",
-                    linewidth=0.8, alpha=0.5)
-        ax.set_ylabel("X19")
-        ax.set_title("Step counter", fontsize=9)
-        ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig("env2_reflex3_validation.png", dpi=120)
-    print("\nSaved env2_reflex3_validation.png")
+    batch_seed = 12345
+    model = next(reflex3_player())
+    np.random.seed(batch_seed)
+    score, std = evaluate(model, Bot, Environment, debug=False, seed=batch_seed)
+    print(f"Reflex3 env2 score (distance): {score:.2f} +/- {std:.2f}")
