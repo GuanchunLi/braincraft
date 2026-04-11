@@ -68,6 +68,17 @@ CORRIDOR_STEPS  = 120     # max steps X21 stays active after shortcut fires
 TURN_STEPS      = 18      # steps at max turn rate (~90° turn)
 APPROACH_STEPS  = 45      # straight-line approach + corridor traverse
 SC_TOTAL        = TURN_STEPS + APPROACH_STEPS  # total shortcut countdown
+
+# --------------- Initial heading correction parameters ---------------------
+# The bot is initialised with direction = 90° + uniform(-5°, +5°).  X13
+# stores an estimator of that drift computed from the left/right sensor
+# asymmetry at step 0.  We use it to physically turn the bot back to
+# upward over the first few steps by driving an override through the X20
+# channel.  After the correction is applied, val7 (the physical turn
+# accumulator) absorbs the turn so theta_lagged = val7 + pi/2 + correction
+# still reflects the true heading and wall-following resumes unmodified.
+INIT_CORR_EPS      = 1e-3   # stop when |remaining| is below this (rad)
+INIT_CORR_CAP      = 0.15   # safety clip on initial |correction| (rad ~ 8.6°)
 # ----------------------------------------------------------------------------
 
 
@@ -136,6 +147,38 @@ def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
 
         theta_lagged = val7 + np.pi / 2 + correction
         sin_lagged = np.sin(theta_lagged)
+
+        # === Initial heading correction X23 / X24 ===
+        # X23 stores the remaining physical turn needed to bring the bot
+        # back to upward.  X24 is a one-shot "has been seeded" flag that
+        # decouples seeding from draining: we seed X23 on the FIRST call
+        # (iteration 0, whose output is dropped by the warmup guard in
+        # challenge_1.evaluate) and only START draining on subsequent
+        # calls, so the override is actually applied to the bot.
+        x23_prev = _g(x, 23)
+        x24_prev = _g(x, 24)
+
+        if x24_prev < 0.5:
+            # First activation call — seed only, no override yet.
+            init_remaining = float(np.clip(-correction,
+                                           -INIT_CORR_CAP, INIT_CORR_CAP))
+            init_dtheta = 0.0
+            init_correction_active = False
+            x23_new = init_remaining
+        else:
+            # Subsequent calls — drain X23 via X20 override below.
+            init_remaining = x23_prev
+            if abs(init_remaining) > INIT_CORR_EPS:
+                init_dtheta = float(np.clip(init_remaining, -a, a))
+                init_correction_active = True
+                x23_new = init_remaining - init_dtheta
+            else:
+                init_dtheta = 0.0
+                init_correction_active = False
+                x23_new = 0.0
+
+        _s(out, 23, x23_new)
+        _s(out, 24, 1.0)
 
         # === Step counter X19 ===
         x10_prev = _g(x, 10)          # previous x-displacement
@@ -213,7 +256,13 @@ def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
             centering = CORRIDOR_GAIN * sin_lagged * prox_diff
 
         # === Set X20 (steering override, added to O via Wout[0,20]=1.0) ===
-        if is_turning:
+        if init_correction_active:
+            # Initial heading correction takes precedence: cancel the
+            # wall-following output and drive exactly init_dtheta so the
+            # bot rotates back to upward during the first steps.  Shortcut
+            # phases cannot fire this early (reward flag is still 0).
+            x20_val = init_dtheta - O_features
+        elif is_turning:
             x20_val = abs(SHORTCUT_TURN) * turn_toward  # ±2.0 → saturates
         elif is_approaching:
             x20_val = -O_no_front  # cancel heading/safety but keep front-block active
@@ -249,10 +298,12 @@ def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
         _s(out, 13, hold_val)
         _s(out, 14, x14)              # identity pass-through
 
-        # === Remaining neurons X22-X999 (relu_tanh, all zero) ===
-        # X21 is set above (corridor-active latch), skip it here.
-        if x.shape[0] > 23:
-            out[23:] = relu_tanh(x[23:])
+        # === Remaining neurons X25-X999 (relu_tanh, all zero) ===
+        # X21 is corridor-active latch, X22 is the shortcut countdown,
+        # X23 is the initial-correction remainder, X24 is the seeded
+        # flag — all skipped here because they are set above.
+        if x.shape[0] > 25:
+            out[25:] = relu_tanh(x[25:])
 
         return out
 
@@ -377,6 +428,17 @@ def reflex2_player():
     # X22: shortcut countdown timer (self-recurrence; logic in activation)
     W[22, 22] = 1.0
 
+    # X23: initial heading correction countdown (self-recurrence; the
+    # activation seeds it from -correction on the first activation call
+    # and drains it at up to ±a rad/step via the X20 override, bringing
+    # the physical heading back to exactly pi/2 within the first steps).
+    W[23, 23] = 1.0
+
+    # X24: one-shot "has-been-seeded" flag for the initial correction.
+    # Activated to 1.0 on the first call; the seeding branch only fires
+    # when X24 is still 0, so warmup-dropped outputs never drain X23.
+    W[24, 24] = 1.0
+
     # Build custom activation with all relevant weights baked in
     wout_features = Wout[0, :6].copy()
     f = make_activation(speed, wout_features)
@@ -411,7 +473,8 @@ if __name__ == "__main__":
     seeds = np.random.randint(0, 1_000_000, 4)
 
     fig, axes = plt.subplots(4, 5, figsize=(25, 16))
-    fig.suptitle("Reflex Player v2 — half-ring shortcut validation", fontsize=13)
+    fig.suptitle("Reflex Player v2 — half-ring shortcut + initial heading correction",
+                 fontsize=13)
 
     for run_idx, s in enumerate(seeds):
         np.random.seed(s)
@@ -425,11 +488,15 @@ if __name__ == "__main__":
         bot.camera.update(bot.position, bot.direction,
                           environment.world, environment.colormap)
 
+        # Log the initial direction BEFORE any step so we can report drift
+        init_direction_deg = np.degrees(bot.direction)
+
         true_pos = [np.array(bot.position, dtype=float)]
         energy_history = [bot.energy]
         reward_flags = [0.0]
         shortcut_flags = [0.0]
-        counter_vals = [0.0]
+        direction_deg = [init_direction_deg]
+        x23_vals = [0.0]
 
         iteration = 0
         n_hits = 0
@@ -447,17 +514,24 @@ if __name__ == "__main__":
             energy_history.append(bot.energy)
             reward_flags.append(float(X[18, 0]))
             shortcut_flags.append(float(X[20, 0]))
-            counter_vals.append(float(X[19, 0]))
+            direction_deg.append(np.degrees(bot.direction))
+            x23_vals.append(float(X[23, 0]))
             iteration += 1
 
         true_pos = np.array(true_pos)
         energy_history = np.array(energy_history)
         reward_flags = np.array(reward_flags)
         shortcut_flags = np.array(shortcut_flags)
-        counter_vals = np.array(counter_vals)
+        direction_deg = np.array(direction_deg)
+        x23_vals = np.array(x23_vals)
 
+        # Find the first step where the bot is effectively upward
+        # (within 0.1° of 90°) — used to verify the correction locked
+        locked_idx = np.argmax(np.abs(direction_deg - 90.0) < 0.1)
+        locked_msg = (f"locked@step={locked_idx} "
+                      f"(initial drift={init_direction_deg-90.0:+.2f}°)")
         print(f"\nRun {run_idx} (seed={s}): {iteration} steps, "
-              f"{n_hits} hits, reward={float(X[18,0]):.2f}")
+              f"{n_hits} hits, reward={float(X[18,0]):.2f}, {locked_msg}")
 
         # --- Plot: trajectory on world map ---
         ax = axes[run_idx, 0]
@@ -505,15 +579,27 @@ if __name__ == "__main__":
         ax.set_title("Shortcut active", fontsize=9)
         ax.grid(True, alpha=0.3)
 
-        # --- Plot: step counter ---
+        # --- Plot: initial heading lock (zoom on first 30 steps) ---
         ax = axes[run_idx, 4]
-        ax.plot(counter_vals, linewidth=0.8, color="C5")
-        ax.axhline(COUNTER_THR, color="red", linestyle="--",
-                    linewidth=0.8, alpha=0.5)
-        ax.set_ylabel("X19")
-        ax.set_title("Step counter", fontsize=9)
+        n_zoom = min(30, len(direction_deg))
+        ax.plot(np.arange(n_zoom), direction_deg[:n_zoom],
+                "o-", linewidth=0.8, markersize=3, color="C5",
+                label="bot dir (deg)")
+        ax.axhline(90.0, color="black", linestyle="--",
+                   linewidth=0.8, alpha=0.5, label="90° target")
+        # Overlay X23 (remaining correction, scaled to deg)
+        ax2 = ax.twinx()
+        ax2.plot(np.arange(n_zoom), np.degrees(x23_vals[:n_zoom]),
+                 "s--", linewidth=0.6, markersize=2, color="C1",
+                 label="X23 remaining (deg)")
+        ax2.set_ylabel("X23 (deg)", color="C1", fontsize=8)
+        ax2.tick_params(axis="y", labelcolor="C1", labelsize=7)
+        ax.set_xlabel("step")
+        ax.set_ylabel("heading (deg)")
+        ax.set_title("Initial heading lock", fontsize=9)
         ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=6, loc="upper right")
 
     plt.tight_layout()
-    plt.savefig("reflex2_validation.png", dpi=120)
-    print("\nSaved reflex2_validation.png")
+    plt.savefig("env1_reflex2_validation.png", dpi=120)
+    print("\nSaved env1_reflex2_validation.png")
