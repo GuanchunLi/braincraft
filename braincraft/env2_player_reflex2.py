@@ -5,11 +5,24 @@
 """
 Reflex Player v2 for Environment 2 — direct port from env1.
 
-Same wall-following + corridor shortcut behavior, adapted for the
-env2 input format (2*p+3 = 131 inputs: 64 depths + 64 colors + hit +
-energy + bias) and env2 evaluation (distance-based scoring).
+Same wall-following + corridor shortcut behavior + initial heading
+correction, adapted for the env2 input format (2*p+3 = 131 inputs:
+64 depths + 64 colors + hit + energy + bias) and env2 evaluation
+(distance-based scoring).
 
-No output behavior change from env1 reflex2 — colors are ignored.
+Behavior:
+  1. First lap: full clockwise outer ring (identical to v1).
+  2. After first reward encounter: at the next opportunity where
+     the bot is heading horizontally near the corridor entrance,
+     it turns right into the corridor, skipping half the ring.
+  3. Subsequent laps: half-ring (one side + corridor), always
+     visiting the same reward source.
+  4. Initial heading correction: the bot is initialised with
+     direction = 90° + uniform(-5°, +5°); X23/X24 drain the drift
+     via the X20 override during the first few steps so that
+     wall-following resumes from exactly 90°.
+
+Color channels are unused (zero weights) — env2 colors ignored.
 """
 
 import time
@@ -44,6 +57,17 @@ CORRIDOR_STEPS  = 120     # max steps X21 stays active after shortcut fires
 TURN_STEPS      = 18      # steps at max turn rate (~90° turn)
 APPROACH_STEPS  = 45      # straight-line approach + corridor traverse
 SC_TOTAL        = TURN_STEPS + APPROACH_STEPS  # total shortcut countdown
+
+# --------------- Initial heading correction parameters ---------------------
+# The bot is initialised with direction = 90° + uniform(-5°, +5°).  X13
+# stores an estimator of that drift computed from the left/right sensor
+# asymmetry at step 0.  We use it to physically turn the bot back to
+# upward over the first few steps by driving an override through the X20
+# channel.  After the correction is applied, val7 (the physical turn
+# accumulator) absorbs the turn so theta_lagged = val7 + pi/2 + correction
+# still reflects the true heading and wall-following resumes unmodified.
+INIT_CORR_EPS      = 1e-3   # stop when |remaining| is below this (rad)
+INIT_CORR_CAP      = 0.15   # safety clip on initial |correction| (rad ~ 8.6°)
 # ----------------------------------------------------------------------------
 
 
@@ -112,6 +136,38 @@ def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
 
         theta_lagged = val7 + np.pi / 2 + correction
         sin_lagged = np.sin(theta_lagged)
+
+        # === Initial heading correction X23 / X24 ===
+        # X23 stores the remaining physical turn needed to bring the bot
+        # back to upward.  X24 is a one-shot "has been seeded" flag that
+        # decouples seeding from draining: we seed X23 on the FIRST call
+        # (iteration 0, whose output is dropped by the warmup guard in
+        # challenge_2.evaluate) and only START draining on subsequent
+        # calls, so the override is actually applied to the bot.
+        x23_prev = _g(x, 23)
+        x24_prev = _g(x, 24)
+
+        if x24_prev < 0.5:
+            # First activation call — seed only, no override yet.
+            init_remaining = float(np.clip(-correction,
+                                           -INIT_CORR_CAP, INIT_CORR_CAP))
+            init_dtheta = 0.0
+            init_correction_active = False
+            x23_new = init_remaining
+        else:
+            # Subsequent calls — drain X23 via X20 override below.
+            init_remaining = x23_prev
+            if abs(init_remaining) > INIT_CORR_EPS:
+                init_dtheta = float(np.clip(init_remaining, -a, a))
+                init_correction_active = True
+                x23_new = init_remaining - init_dtheta
+            else:
+                init_dtheta = 0.0
+                init_correction_active = False
+                x23_new = 0.0
+
+        _s(out, 23, x23_new)
+        _s(out, 24, 1.0)
 
         # === Step counter X19 ===
         x10_prev = _g(x, 10)          # previous x-displacement
@@ -183,7 +239,13 @@ def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
             centering = CORRIDOR_GAIN * sin_lagged * prox_diff
 
         # === Set X20 (steering override, added to O via Wout[0,20]=1.0) ===
-        if is_turning:
+        if init_correction_active:
+            # Initial heading correction takes precedence: cancel the
+            # wall-following output and drive exactly init_dtheta so the
+            # bot rotates back to upward during the first steps.  Shortcut
+            # phases cannot fire this early (reward flag is still 0).
+            x20_val = init_dtheta - O_features
+        elif is_turning:
             x20_val = abs(SHORTCUT_TURN) * turn_toward  # ±2.0 → saturates
         elif is_approaching:
             x20_val = -O_no_front  # cancel heading/safety but keep front-block active
@@ -219,10 +281,12 @@ def make_activation(speed, wout_feature_weights, wout_shortcut_weight=0.0):
         _s(out, 13, hold_val)
         _s(out, 14, x14)              # identity pass-through
 
-        # === Remaining neurons X22-X999 (relu_tanh, all zero) ===
-        # X21 is set above (corridor-active latch), skip it here.
-        if x.shape[0] > 23:
-            out[23:] = relu_tanh(x[23:])
+        # === Remaining neurons X25-X999 (relu_tanh, all zero) ===
+        # X21 is corridor-active latch, X22 is the shortcut countdown,
+        # X23 is the initial-correction remainder, X24 is the seeded
+        # flag — all skipped here because they are set above.
+        if x.shape[0] > 25:
+            out[25:] = relu_tanh(x[25:])
 
         return out
 
@@ -352,6 +416,17 @@ def reflex2_player():
 
     # X22: shortcut countdown timer (self-recurrence; logic in activation)
     W[22, 22] = 1.0
+
+    # X23: initial heading correction countdown (self-recurrence; the
+    # activation seeds it from -correction on the first activation call
+    # and drains it at up to ±a rad/step via the X20 override, bringing
+    # the physical heading back to exactly pi/2 within the first steps).
+    W[23, 23] = 1.0
+
+    # X24: one-shot "has-been-seeded" flag for the initial correction.
+    # Activated to 1.0 on the first call; the seeding branch only fires
+    # when X24 is still 0, so warmup-dropped outputs never drain X23.
+    W[24, 24] = 1.0
 
     # Build custom activation with all relevant weights baked in
     wout_features = Wout[0, :6].copy()
