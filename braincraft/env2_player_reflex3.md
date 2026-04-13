@@ -93,7 +93,6 @@ The 1000 hidden units are partitioned by function. Only a small fraction are act
 | $X_{15}$--$X_{18}$ | Reward circuit | relu_tanh | Energy-pulse reward detector/latch |
 | $X_{19}$ | Step counter | custom | Steps since last corridor crossing |
 | $X_{20}$ | Steering override | custom | Shortcut/correction override |
-| $X_{21}$ | Corridor timer | custom | Countdown for corridor centering |
 | $X_{22}$ | Shortcut countdown | custom | Countdown for shortcut maneuver |
 | $X_{23}$ | Init correction remainder | custom | Remaining initial heading fix |
 | $X_{24}$ | Seeded flag | custom | One-shot flag for init correction |
@@ -419,16 +418,6 @@ where $d_{\text{turn}} = -\text{sign}(\cos\theta_{\text{lag}}) \cdot \text{sign}
 $$
 X_{20} = -O_{\text{no\_front}}, \quad O_{\text{no\_front}} = \sum_{i=0}^{4} w_i X_i
 $$
-
-### 8.4 Corridor Centering ($X_{21}$)
-
-When a shortcut is active, $X_{21}$ is set to 120 and decrements. While $X_{21} > 0.5$ and $|\sin\theta_{\text{lag}}| > 0.30$:
-
-$$
-\text{centering} = 5.0 \cdot \sin(\theta_{\text{lag}}) \cdot (X_3^{\text{prev}} - X_4^{\text{prev}})
-$$
-
-This uses the left-right safety difference to keep the bot centered in the corridor.
 
 ---
 

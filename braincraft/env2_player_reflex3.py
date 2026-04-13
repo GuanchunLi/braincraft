@@ -248,23 +248,6 @@ def make_activation(
 
         _s(out, 22, sc_countdown)
 
-        x21_prev = _g(x, 21)
-        if sc_countdown > 0.5:
-            corr_val = float(reflex2.CORRIDOR_STEPS)
-        elif x21_prev > 0.5:
-            corr_val = x21_prev - 1.0
-        else:
-            corr_val = 0.0
-        _s(out, 21, corr_val)
-
-        if corr_val > 0.5 and abs(sin_lagged) > reflex2.CORRIDOR_SIN_THR:
-            x3_pre = _g(x, 3)
-            x4_pre = _g(x, 4)
-            prox_diff = x3_pre - x4_pre
-            centering = reflex2.CORRIDOR_GAIN * sin_lagged * prox_diff
-        else:
-            centering = 0.0
-
         if init_correction_active:
             x20_val = init_dtheta - O_features
         elif is_turning:
