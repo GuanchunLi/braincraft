@@ -354,10 +354,19 @@ def reflex3_player():
 
 
 if __name__ == "__main__":
-    from challenge_2 import evaluate
+    import time
+    from challenge_2 import evaluate, train
 
-    batch_seed = 12345
-    model = next(reflex3_player())
-    np.random.seed(batch_seed)
-    score, std = evaluate(model, Bot, Environment, debug=False, seed=batch_seed)
-    print(f"Reflex3 env2 score (distance): {score:.2f} +/- {std:.2f}")
+    seed = 12345
+    np.random.seed(seed)
+    print("Training reflex3 player for env2 (single yield, instant)...")
+    model = train(reflex3_player, timeout=100)
+
+    W_in, W, W_out, warmup, leak, f, g = model
+
+    # Evaluation
+    start_time = time.time()
+    score, std = evaluate(model, Bot, Environment, debug=False, seed=seed)
+    elapsed = time.time() - start_time
+    print(f"Evaluation completed after {elapsed:.2f} seconds")
+    print(f"Final score (distance): {score:.2f} +/- {std:.2f}")
