@@ -116,22 +116,7 @@ def make_activation(speed, wout_feature_weights, front_gain_mag, n_rays):
     BIO_END     = idx["bio_end"]
 
     def f(x):
-        if x.ndim == 1:
-            is2d = False
-        elif x.ndim == 2 and x.shape[1] == 1:
-            is2d = True
-        else:
-            raise ValueError(f"expected shape (n,) or (n,1); got {x.shape}")
-
-        def _g(arr, i):
-            return float(arr[i, 0]) if is2d else float(arr[i])
-
-        def _s(arr, i, v):
-            if is2d:
-                arr[i, 0] = v
-            else:
-                arr[i] = v
-
+        # x has shape (n, 1) — challenge runners always pass column vectors.
         out = np.empty_like(x)
 
         # ── Standard feature neurons X0-X5 ──
@@ -147,15 +132,15 @@ def make_activation(speed, wout_feature_weights, front_gain_mag, n_rays):
         out[25:BIO_END] = relu_tanh(x[25:BIO_END])
 
         # ── Read color evidence from network-computed L_ev / R_ev ──
-        l_ev_val = _g(out, L_EV)
-        r_ev_val = _g(out, R_EV)
+        l_ev_val = float(out[L_EV, 0])
+        r_ev_val = float(out[R_EV, 0])
 
         left_evidence  = 1.0 if l_ev_val > 0.1 and r_ev_val < 0.1 else 0.0
         right_evidence = 1.0 if r_ev_val > 0.1 and l_ev_val < 0.1 else 0.0
 
         # ── Evidence accumulator and front-sign latch ──
-        evidence_prev   = _g(x, EVIDENCE)
-        front_sign_prev = _g(x, FRONT_SIGN)
+        evidence_prev   = float(x[EVIDENCE, 0])
+        front_sign_prev = float(x[FRONT_SIGN, 0])
 
         if abs(front_sign_prev) < 0.5:
             evidence_now = evidence_prev + right_evidence - left_evidence
@@ -169,17 +154,17 @@ def make_activation(speed, wout_feature_weights, front_gain_mag, n_rays):
             evidence_now   = evidence_prev
             front_sign_val = front_sign_prev
 
-        _s(out, EVIDENCE,   evidence_now)
-        _s(out, FRONT_SIGN, front_sign_val)
+        out[EVIDENCE, 0]   = evidence_now
+        out[FRONT_SIGN, 0] = front_sign_val
 
         # ── Gated front-block output from X5_pos / X5_neg ──
-        x5_pos_val = _g(out, X5_POS)
-        x5_neg_val = _g(out, X5_NEG)
+        x5_pos_val = float(out[X5_POS, 0])
+        x5_neg_val = float(out[X5_NEG, 0])
 
         # ── Lagged heading state ──
-        val7 = _g(x, 7)
-        x13  = _g(x, 13)
-        x14  = _g(x, 14)
+        val7 = float(x[7, 0])
+        x13  = float(x[13, 0])
+        x14  = float(x[14, 0])
 
         if abs(val7) < 1e-8:
             correction = x13
@@ -192,8 +177,8 @@ def make_activation(speed, wout_feature_weights, front_gain_mag, n_rays):
         sin_lagged   = np.sin(theta_lagged)
 
         # ── Initial heading correction X23/X24 ──
-        x23_prev = _g(x, 23)
-        x24_prev = _g(x, 24)
+        x23_prev = float(x[23, 0])
+        x24_prev = float(x[24, 0])
 
         if x24_prev < 0.5:
             init_remaining = float(
@@ -213,12 +198,12 @@ def make_activation(speed, wout_feature_weights, front_gain_mag, n_rays):
                 init_correction_active = False
                 x23_new = 0.0
 
-        _s(out, 23, x23_new)
-        _s(out, 24, 1.0)
+        out[23, 0] = x23_new
+        out[24, 0] = 1.0
 
         # ── Step counter X19 ──
-        x10_prev     = _g(x, 10)
-        x19_val      = _g(x, 19)
+        x10_prev     = float(x[10, 0])
+        x19_val      = float(x[19, 0])
         near_center  = abs(x10_prev) < NEAR_CENTER_THR
         heading_vert = abs(sin_lagged) > SIN_VERT_THR
 
@@ -226,12 +211,12 @@ def make_activation(speed, wout_feature_weights, front_gain_mag, n_rays):
             counter = 0.0
         else:
             counter = x19_val + 1.0
-        _s(out, 19, counter)
+        out[19, 0] = counter
 
         # ── Shortcut steering X20 ──
-        is_rewarded   = _g(out, 18) > 0.5
+        is_rewarded   = float(out[18, 0]) > 0.5
         heading_horiz = abs(sin_lagged) < SIN_HORIZ_THR
-        front_clear   = _g(out, 5) < 0.1
+        front_clear   = float(out[5, 0]) < 0.1
         enough_steps  = x19_val > COUNTER_THR
         cos_lagged    = np.cos(theta_lagged)
         if abs(cos_lagged) > 0.5:
@@ -240,7 +225,7 @@ def make_activation(speed, wout_feature_weights, front_gain_mag, n_rays):
             trig_offset = 0.0
         near_corr = abs(x10_prev - trig_offset) < NEAR_CENTER_THR
 
-        x22_prev = _g(x, 22) if x.shape[0] > 22 else 0.0
+        x22_prev = float(x[22, 0]) if x.shape[0] > 22 else 0.0
         trigger = (
             is_rewarded
             and heading_horiz
@@ -260,23 +245,19 @@ def make_activation(speed, wout_feature_weights, front_gain_mag, n_rays):
         is_turning     = sc_countdown > float(APPROACH_STEPS) + 0.5
         is_approaching = sc_countdown > 0.5 and not is_turning
 
-        x11_prev = _g(x, 11)
+        x11_prev = float(x[11, 0])
         if abs(x11_prev) > 0.01:
             turn_toward = -np.sign(cos_lagged) * np.sign(x11_prev)
         else:
             turn_toward = -1.0
 
         # ── Compute O_features ──
-        if is2d:
-            O_main     = float(wout @ out[:6, 0])
-            O_no_front = float(wout[:5] @ out[:5, 0])
-        else:
-            O_main     = float(wout @ out[:6])
-            O_no_front = float(wout[:5] @ out[:5])
+        O_main     = float(wout @ out[:6, 0])
+        O_no_front = float(wout[:5] @ out[:5, 0])
 
         O_features = O_main + front_gain_mag * x5_pos_val - front_gain_mag * x5_neg_val
 
-        _s(out, 22, sc_countdown)
+        out[22, 0] = sc_countdown
 
         if init_correction_active:
             x20_val = init_dtheta - O_features
@@ -286,11 +267,11 @@ def make_activation(speed, wout_feature_weights, front_gain_mag, n_rays):
             x20_val = -O_no_front
         else:
             x20_val = 0.0
-        _s(out, 20, x20_val)
+        out[20, 0] = x20_val
 
         O_now = O_features + x20_val
         dtheta_now = np.clip(O_now, -a, a)
-        _s(out, 6, dtheta_now)
+        out[6, 0] = dtheta_now
 
         # ── Direction accumulator X7 (pass-through) ──
         out[7:8] = x[7:8]
@@ -299,21 +280,21 @@ def make_activation(speed, wout_feature_weights, front_gain_mag, n_rays):
         theta_now = val7 + np.pi / 2 + correction + dtheta_now
         cos_now   = np.cos(theta_now)
         sin_now   = np.sin(theta_now)
-        _s(out, 8, cos_now)
-        _s(out, 9, sin_now)
+        out[8, 0] = cos_now
+        out[9, 0] = sin_now
 
         # ── Position accumulators X10-X11 (gated by hit) ──
-        hit_val = _g(x, 12)
+        hit_val = float(x[12, 0])
         if hit_val < 0.5:
-            _s(out, 10, _g(x, 10) + speed * cos_now)
-            _s(out, 11, _g(x, 11) + speed * sin_now)
+            out[10, 0] = float(x[10, 0]) + speed * cos_now
+            out[11, 0] = float(x[11, 0]) + speed * sin_now
         else:
-            _s(out, 10, _g(x, 10))
-            _s(out, 11, _g(x, 11))
+            out[10, 0] = float(x[10, 0])
+            out[11, 0] = float(x[11, 0])
 
         # ── Correction neurons X13-X14 ──
-        _s(out, 13, hold_val)
-        _s(out, 14, x14)
+        out[13, 0] = hold_val
+        out[14, 0] = x14
 
         # ── Remaining neurons ──
         if x.shape[0] > BIO_END:
