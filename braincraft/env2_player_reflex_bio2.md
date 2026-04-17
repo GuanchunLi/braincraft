@@ -10,8 +10,13 @@ library. Once built, the controller is a pure reservoir:
 
 ```text
 X[t+1] = f( Win · I[t] + W · X[t] )
-O[t]   = Wout · X[t]            (scalar steering command)
+O[t+1] = Wout · g( X[t+1] )      (scalar steering command)
 ```
+
+In the simulator loop, the state update uses the previous state and current
+input, the readout is then computed from the updated state, and `O` is passed
+to `bot.forward()`. The actuator clips that command to the allowed `[-5 deg,
++5 deg]` range.
 
 with `n = 1000` neurons, `p = 64` color rays, `n_inputs = 2 p + 3 = 131`
 (proximity[0..p-1], color[0..p-1], hit, energy, bias=1), `warmup = 0`,
@@ -102,7 +107,7 @@ Neuron slots:
 | `10, 11`   | `(x, y)` position      | `identity`   |
 | `12`       | unused                 | (unused)     |
 | `13`       | initial-heading latch  | `identity`   |
-| `14`       | instantaneous sensor   | `identity`   |
+| `14`       | parity correction tap  | `identity`   |
 | `15..18`   | reward circuit         | `relu_tanh`  |
 | `19`       | step counter           | `relu`       |
 | `20`       | `shortcut_steer`       | `identity`   |
@@ -152,10 +157,11 @@ reduces to `front_block + shortcut_steer`.
 
 ### 4.2 Steering output `O` and `X6`
 
-The scalar command and its clipped lagged copy:
+The scalar readout and its clipped lagged copy used inside the recurrence:
 
 ```text
-O = Wout · X
+O = Wout · g(X)
+  = Wout · X
   =  hit_turn           · X0
   +  heading_gain       · X1
   + (-heading_gain)     · X2
@@ -174,7 +180,10 @@ X6[t] = clip( O[t-1], -a, +a ),  a = 5 deg
 ```
 
 `X6` is implemented by copying `Wout[0,:]` into `W[6,:]` after everything else
-is wired, and applying `clip` as the activation for slot 6.
+is wired, and applying `clip` as the activation for slot 6. This makes `X6`
+the clipped delayed steering state used by the recurrent dynamics. The
+simulator still forwards `O = Wout · g(X)` to `bot.forward()` each step, and
+the actuator applies its own clamp there as well.
 
 ### 4.3 Direction and position accumulators
 
@@ -217,16 +226,19 @@ SEEDN = relu_tanh(  cal_gain · prox[L_idx] - cal_gain · prox[R_idx]
                    - 1e3 · X24_prev )
 ```
 
-Together `SEEDP - SEEDN = current_corr_0`. Two neurons consume them:
+Together `SEEDP - SEEDN` encodes the signed initial correction and closely
+approximates `current_corr_0` over the observed initialization range. Two
+neurons consume them:
 
 ```text
 X13 = X13_prev + SEEDP_prev - SEEDN_prev                     (identity)
-init_impulse = -SEEDP_prev + SEEDN_prev    (= -current_corr_0)
+init_impulse = -SEEDP_prev + SEEDN_prev    (~ -current_corr_0)
 ```
 
 `X13` carries the initial correction forever (a 1-step lag vs bio1, negligible).
-`init_impulse` is a one-step steering pulse delivered through `Wout` with
-weight `1.0`.
+`X14` keeps the instantaneous correction signal as a parity/legacy identity
+slot, but no downstream bio2 circuit reads it. `init_impulse` is a one-step
+steering pulse delivered through `Wout` with weight `1.0`.
 
 ### 4.5 Color evidence (blue bump detectors)
 
@@ -491,8 +503,10 @@ Wout[0, init_impulse]    = +1.0
 ```
 
 The clipped steering neuron `X6` reads the same row of `Wout` through a copy
-into `W[6, :]`, so `z[6] = O_{t-1}` and the actual command delivered to the
-bot each step is `X6 = clip(O_{t-1}, -a, a)`.
+into `W[6, :]`, so `z[6] = O_{t-1}` and the recurrent state stores
+`X6 = clip(O_{t-1}, -a, a)`. The simulator then forwards the fresh readout
+`O = Wout · g(X)` to the bot each step, with the actuator clip applied in
+`bot.forward()`.
 
 ---
 
