@@ -41,7 +41,7 @@ Neuron layout (selected):
   X12       : unused legacy slot
   X13, X14  : correction latch / instantaneous (identity)
   X15..X18  : reward circuit     (relu_tanh)
-  X19       : step counter       (relu)
+  X19       : unused legacy slot (former step counter)
   X20       : shortcut_steer     (identity)
   X22       : shortcut countdown (relu)
   X23       : init_impulse       (identity)
@@ -138,13 +138,9 @@ def _bio2_indices(n_rays, use_xi_red=False):
 
     # Shortcut predicates.
     alloc("near_center")   # |X10| < NEAR_CENTER_THR
-    alloc("heading_vert")  # sin^2 > SIN_VERT_THR^2
     alloc("heading_horiz") # sin^2 < SIN_HORIZ_THR^2
     alloc("front_clear")   # X5p + X5n small
-    alloc("enough_steps")  # X19 > COUNTER_THR
-    alloc("sc_idle")       # X22 < 0.5
-    alloc("nc_and_hv")     # near_center AND heading_vert  (for counter reset)
-    alloc("trig_sc")       # AND of 6 conditions
+    alloc("trig_sc")       # AND of 4 conditions (refractory via -K*X22)
 
     # Shortcut phase indicators.
     alloc("on_22")         # X22 > 0.5
@@ -186,7 +182,7 @@ def make_activation(a, idx):
     id_list = [7, 10, 11, 13, 14, idx["shortcut_steer"], idx["init_impulse"], idx["evidence"]]
     sin_list = [idx["cos_n"], idx["sin_n"]]
     square_list = [idx["sin_sq"]]
-    relu_list = [19, 22]
+    relu_list = [22]
     bump_list = [idx["near_center"], idx["near_e"], idx["near_w"]]
     bump_list.extend(range(idx["xi_blue_start"], idx["xi_blue_stop"]))
     if "xi_red_start" in idx:
@@ -265,12 +261,8 @@ def reflex_bio2_player():
     Y_POS    = idx["y_pos"]
     Y_NEG    = idx["y_neg"]
     NC       = idx["near_center"]
-    HV       = idx["heading_vert"]
     HH       = idx["heading_horiz"]
     FC       = idx["front_clear"]
-    ES       = idx["enough_steps"]
-    SCI      = idx["sc_idle"]
-    NCV      = idx["nc_and_hv"]
     TSC      = idx["trig_sc"]
     ON22     = idx["on_22"]
     IST      = idx["is_turn"]
@@ -386,11 +378,7 @@ def reflex_bio2_player():
     # ── X24: seeded flag (rt that saturates to 1 at step 1) -----
     Win[24, bias_idx] = 10.0
 
-    # ── X19: step counter (relu) ---------------------------------
-    # z[19] = X_prev[19] + 1 - BIG * NCV_prev    (reset when NC AND HV)
-    W[19, 19] = 1.0
-    Win[19, bias_idx] = 1.0
-    W[19, NCV] = -float(1.0e6)   # huge negative pulse resets to 0
+    # Slot 19 is unused (former step counter, retired with ES removal).
 
     # ── Shortcut outputs -----------------------------------------
     # Route shortcut steering and the one-shot init impulse through
@@ -518,10 +506,7 @@ def reflex_bio2_player():
     bump_scale = 1.0 / (2.0 * NEAR_CENTER_THR)
     W[NC, 10] = bump_scale
 
-    # HV / HH now read the exact squared sine magnitude.
-    W[HV, SIN_SQ] = K_SHARP / (SIN_VERT_THR ** 2)
-    Win[HV, bias_idx] = -K_SHARP
-
+    # HH reads the exact squared sine magnitude.
     W[HH, SIN_SQ] = -K_SHARP / (SIN_HORIZ_THR ** 2)
     Win[HH, bias_idx] = K_SHARP
 
@@ -529,21 +514,6 @@ def reflex_bio2_player():
     W[FC, X5P] = -K_SHARP
     W[FC, X5N] = -K_SHARP
     Win[FC, bias_idx] =  K_SHARP * 0.1
-
-    # ENOUGH_STEPS: X19 > COUNTER_THR.
-    # X19 is a raw counter; relu-activated, so its value is an int ≥ 0.
-    W[ES, 19] = K_SHARP / float(COUNTER_THR)
-    Win[ES, bias_idx] = -K_SHARP
-
-    # SC_IDLE: X22 < 0.5.
-    W[SCI, 22] = -K_SHARP
-    Win[SCI, bias_idx] = 0.5 * K_SHARP
-
-    # NCV: NEAR_CENTER AND HEADING_VERT. Lower the threshold because
-    # the bump-shaped near-center predicate tapers to 0 at the band edge.
-    W[NCV, NC] =  K_SHARP
-    W[NCV, HV] =  K_SHARP
-    Win[NCV, bias_idx] = -K_SHARP * 1.2
 
     # ── near_corr helpers ───────────────────────────────────────
     # COS_BIG_POS: cos > 0.5 (sharp).
@@ -584,21 +554,24 @@ def reflex_bio2_player():
     W[NEAR_CORR, NCR_C] = K_SHARP
     Win[NEAR_CORR, bias_idx] = -0.5 * K_SHARP
 
-    # TRIG_SC: AND of (X18>0.5, HH, FC, ES, NEAR_CORR, SCI).
+    # TRIG_SC: AND of (X18>0.5, HH, FC, NEAR_CORR).
     # Use near_corr (offset-shifted) instead of NC so the shortcut
     # actually fires when the bot is on-corridor under a slanted heading.
+    # Historical AND terms SCI (X22<0.5) and ES (X19>60) were removed:
+    # SCI was redundant with the `-K·X22_prev` refractory below, and ES
+    # had no empirical effect on the accepted score. Bias re-centered
+    # to -3.5·K for the AND-of-4.
     W[TSC, 18] =  K_SHARP
     W[TSC, HH] =  K_SHARP
     W[TSC, FC] =  K_SHARP
-    W[TSC, ES] =  K_SHARP
     W[TSC, NEAR_CORR] =  K_SHARP
-    W[TSC, SCI] = K_SHARP
-    Win[TSC, bias_idx] = -K_SHARP * 5.5
-    # Refractory: once TSC fires, keep it suppressed.  SCI has a 2-step
-    # lag relative to TSC (TSC → X22 → SCI), so we need two independent
-    # inhibition paths to avoid TSC firing 3 consecutive times:
+    Win[TSC, bias_idx] = -K_SHARP * 3.5
+    # Refractory: once TSC fires, keep it suppressed through two paths:
     #   • W[TSC, TSC]: blocks t+1 (reads TSC_prev directly)
-    #   • W[TSC, 22]:  blocks t+2..t+SC_TOTAL (reads X22 countdown)
+    #   • W[TSC, 22]:  blocks t+2..t+SC_TOTAL (reads X22 countdown;
+    #     at X22_prev>=1 this contributes <=-K, which together with the
+    #     -4.5·K bias sinks the AND below zero even if all 5 positive
+    #     inputs are saturated to 1)
     W[TSC, TSC] = -K_SHARP * 10
     W[TSC, 22]  = -K_SHARP
 

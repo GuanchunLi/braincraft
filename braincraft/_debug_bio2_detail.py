@@ -69,7 +69,6 @@ def trace_player(model_iter, label, n_steps=20, seed=12345, bio2_idx=None):
             ncorr = _get_value(X_new, bio2_idx, "near_corr")
             hh = _get_value(X_new, bio2_idx, "heading_horiz")
             fc = _get_value(X_new, bio2_idx, "front_clear")
-            es = _get_value(X_new, bio2_idx, "enough_steps")
             tsc = _get_value(X_new, bio2_idx, "trig_sc")
             ist = _get_value(X_new, bio2_idx, "is_turn")
             sc = _get_value(X_new, bio2_idx, "shortcut_steer", 0.0)
@@ -78,7 +77,7 @@ def trace_player(model_iter, label, n_steps=20, seed=12345, bio2_idx=None):
             print(f"{t:3d} X10={x10:+.3f} cosN={cosn:+.3f} CBP={cosbp:.1f} CBN={cosbn:.1f} "
                   f"NE={_format_optional(near_e, '.1f')} NW={_format_optional(near_w, '.1f')} "
                   f"NCE={ncre:.1f} NCW={ncrw:.1f} NCR={ncorr:.1f} "
-                  f"HH={hh:.1f} FC={fc:.1f} ES={es:.1f} X22={x22:5.1f} "
+                  f"HH={hh:.1f} FC={fc:.1f} X22={x22:5.1f} "
                   f"TSC={tsc:.1f} IST={ist:.1f} "
                   f"SC={sc:+.3f} INIT={init:+.3f} SUM={x20:+.3f} "
                   f"O={O:+.3f} pos=({bot.position[0]:.3f},{bot.position[1]:.3f}) dir={np.degrees(bot.direction):.1f}")

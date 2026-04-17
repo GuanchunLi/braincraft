@@ -62,8 +62,7 @@ Constants:
 ```text
 SHORTCUT_TURN    = -2.0
 SIN_HORIZ_THR    = 0.35
-SIN_VERT_THR     = 0.70
-COUNTER_THR      = 60
+SIN_VERT_THR     = 0.70   (legacy, no longer read)
 NEAR_CENTER_THR  = 0.05
 DRIFT_OFFSET     = 0.175
 TURN_STEPS       = 18
@@ -109,7 +108,7 @@ Neuron slots:
 | `13`       | initial-heading latch  | `identity`   |
 | `14`       | parity correction tap  | `identity`   |
 | `15..18`   | reward circuit         | `relu_tanh`  |
-| `19`       | step counter           | `relu`       |
+| `19`       | unused (legacy)        | (unused)     |
 | `20`       | `shortcut_steer`       | `identity`   |
 | `22`       | shortcut countdown     | `relu`       |
 | `23`       | `init_impulse`         | `identity`   |
@@ -124,12 +123,11 @@ Helper layout (no red-fallback bank):
 | `89..99`    | `l_ev, r_ev, dleft, dright, evidence, trig_pos, trig_neg, fs_pos, fs_neg, x5_pos, x5_neg` |
 | `100..101`  | `cos_n, sin_n`                                                                      |
 | `102..106`  | `sin_sq, cos_pos, cos_neg, y_pos, y_neg`                                            |
-| `107..113`  | `near_center, heading_vert, heading_horiz, front_clear, enough_steps, sc_idle, nc_and_hv` |
-| `114`       | `trig_sc`                                                                           |
-| `115..117`  | `on_22, is_turn, is_app`                                                            |
-| `118, 119`  | `seed_pos, seed_neg`                                                                |
-| `120..123`  | `cy_pp, cy_pn, cy_np, cy_nn`                                                        |
-| `124..132`  | `cos_big_pos, cos_big_neg, near_e, near_w, ncr_e, ncr_w, cos_small, ncr_c, near_corr` |
+| `107..110`  | `near_center, heading_horiz, front_clear, trig_sc`                                  |
+| `111..113`  | `on_22, is_turn, is_app`                                                            |
+| `114, 115`  | `seed_pos, seed_neg`                                                                |
+| `116..119`  | `cy_pp, cy_pn, cy_np, cy_nn`                                                        |
+| `120..128`  | `cos_big_pos, cos_big_neg, near_e, near_w, ncr_e, ncr_w, cos_small, ncr_c, near_corr` |
 
 ---
 
@@ -334,49 +332,32 @@ NEAR_W      = bump( bump_scale · X10_prev - DRIFT_OFFSET · bump_scale )
             = bump( (X10_prev - DRIFT_OFFSET) / (2 · NEAR_CENTER_THR) )
 ```
 
-### 4.11 Heading predicates
+### 4.11 Heading predicate
+
+Only the horizontal-heading test is used by the downstream trigger; the former
+`heading_vert` (`HV`) neuron was removed together with the step counter it
+gated.
 
 ```text
-HV (heading_vert)  = relu_tanh( (K_SHARP / SIN_VERT_THR^2) · SIN_SQ_prev
-                                - K_SHARP )
-                   ~= 1 iff  SIN_SQ > SIN_VERT_THR^2  (0.49)
-
 HH (heading_horiz) = relu_tanh( -(K_SHARP / SIN_HORIZ_THR^2) · SIN_SQ_prev
                                 + K_SHARP )
                    ~= 1 iff  SIN_SQ < SIN_HORIZ_THR^2 (0.1225)
 ```
 
-### 4.12 Shortcut support predicates
+### 4.12 Front-clear predicate
 
 ```text
 FC  (front_clear)   = relu_tanh( -K_SHARP · X5P_prev - K_SHARP · X5N_prev
                                  + 0.1 · K_SHARP )
                     ~= 1 iff  X5P + X5N < 0.1
-
-ES  (enough_steps)  = relu_tanh( (K_SHARP / COUNTER_THR) · X19_prev - K_SHARP )
-                    ~= 1 iff  X19 > COUNTER_THR  (60)
-
-SCI (sc_idle)       = relu_tanh( -K_SHARP · X22_prev + 0.5 · K_SHARP )
-                    ~= 1 iff  X22 < 0.5
 ```
 
-### 4.13 Step counter `X19` (relu)
-
-```text
-X19 = relu( X19_prev + 1 - 1e6 · NCV_prev )
-```
-
-A large negative pulse from `NCV` resets the counter to 0 whenever the bot is
-near-center with a vertical heading.
-
-### 4.14 `NCV`: near-center AND heading-vert (with lowered threshold)
-
-Because `NC` is bump-shaped (tapers to 0 at the band edge), the AND uses a
-bias of `-1.2·K_SHARP` instead of `-1.5·K_SHARP`:
-
-```text
-NCV = relu_tanh( K_SHARP · NC_prev + K_SHARP · HV_prev - 1.2 · K_SHARP )
-```
+The historical `SCI = 1 iff X22 < 0.5` and `ES = 1 iff X19 > COUNTER_THR`
+AND-terms of `TSC` were retired: `SCI` was redundant with the
+`-K·X22_prev` refractory (see §4.16), and `ES` turned out to have no
+empirical effect on the accepted score once the refractory was in place.
+Their supporting neurons (`X19` step counter, `NCV = near_center AND
+heading_vert`, and `HV`) were dropped in the same pass.
 
 ### 4.15 `near_corr`: corridor-aware center predicate
 
@@ -407,22 +388,27 @@ choosing the drift-offset band that matches its current heading quadrant.
 
 ### 4.16 Shortcut trigger `TSC`
 
-Six-way AND with double inhibition to prevent back-to-back firings:
+Four-way AND with double inhibition to prevent back-to-back firings:
 
 ```text
 TSC = relu_tanh( K_SHARP · X18_prev
                  + K_SHARP · HH_prev
                  + K_SHARP · FC_prev
-                 + K_SHARP · ES_prev
                  + K_SHARP · NEAR_CORR_prev
-                 + K_SHARP · SCI_prev
                  - K_SHARP · 10 · TSC_prev   (blocks t+1)
                  - K_SHARP · X22_prev        (blocks t+2..t+SC_TOTAL)
-                 - K_SHARP · 5.5 )
+                 - K_SHARP · 3.5 )
 ```
 
-`TSC ~ 1` iff all six inputs are 1 AND it has not fired recently. The bias
-`-5.5 K_SHARP` is the AND-of-6 threshold.
+`TSC ~ 1` iff all four positive inputs are 1 AND it has not fired recently.
+The bias `-3.5·K_SHARP` is the AND-of-4 threshold.
+
+**Refractory coverage.** The `-K·X22_prev` term alone kills the AND whenever
+`X22 >= 1`: the four positive inputs contribute at most `4·K`, the bias
+contributes `-3.5·K`, and `-K·X22_prev <= -K` drops the sum to `<= -0.5·K`,
+which saturates the `relu_tanh` to 0. At `X22 = 0` the inhibition vanishes
+and `TSC` fires when the four positive inputs align. The `-10·K·TSC_prev`
+path covers the one step between firing and loading `X22`.
 
 ### 4.17 Countdown `X22` and phase indicators
 
