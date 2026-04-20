@@ -21,6 +21,7 @@ The concrete build uses:
 - `warmup = 0`
 - `leak = 1`
 - actuator clip `step_a = 5 deg`
+- bot step `speed = 0.01` (from `bot.speed`, used by `pos_x` / `pos_y`)
 
 The controller keeps the accepted env2 behavior while expressing the reward
 logic, shortcut state machine, trig helpers, and position tracking as fixed
