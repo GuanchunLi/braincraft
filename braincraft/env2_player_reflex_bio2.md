@@ -105,16 +105,16 @@ Live bio2 slots in allocator order:
 | `17` | `sc_countdown` | `relu` | shortcut countdown |
 | `18` | `shortcut_steer` | `identity` | shortcut steering term |
 | `19` | `init_impulse` | `identity` | one-step initial correction pulse |
-| `20` | `cos_n` | `sin` | sine-shifted trig helper for `pos_x` |
-| `21` | `sin_n` | `sin` | sine-shifted trig helper for `pos_y` |
-| `22` | `sin_sq` | `square` | exact `sin_n^2` magnitude |
-| `23` | `cos_pos` | `relu_tanh` | `cos_n > 0` detector |
-| `24` | `cos_neg` | `relu_tanh` | `cos_n < 0` detector |
+| `20` | `sin_n` | `sin` | `sin(phi)` trig helper for `pos_x` |
+| `21` | `cos_n` | `sin` | `cos(phi)` trig helper for `pos_y` |
+| `22` | `sin_sq` | `square` | `cos_n^2` magnitude (legacy name) |
+| `23` | `cos_pos` | `relu_tanh` | `-sin(phi) > 0` detector (legacy quadrant name) |
+| `24` | `cos_neg` | `relu_tanh` | `-sin(phi) < 0` detector (legacy quadrant name) |
 | `25` | `y_pos` | `relu_tanh` | `pos_y > 0` detector |
 | `26` | `y_neg` | `relu_tanh` | `pos_y < 0` detector |
-| `27` | `cos_big_pos` | `relu_tanh` | `cos_n > 0.5` detector |
-| `28` | `cos_big_neg` | `relu_tanh` | `cos_n < -0.5` detector |
-| `29` | `cos_small` | `relu_tanh` | `|cos_n| <= 0.5` detector |
+| `27` | `cos_big_pos` | `relu_tanh` | `-sin(phi) > 0.5` detector (legacy quadrant name) |
+| `28` | `cos_big_neg` | `relu_tanh` | `-sin(phi) < -0.5` detector (legacy quadrant name) |
+| `29` | `cos_small` | `relu_tanh` | `|sin(phi)| <= 0.5` detector (legacy quadrant name) |
 | `30` | `near_c` | `bump` | near-center corridor detector |
 | `31` | `near_e` | `bump` | east-shifted corridor detector |
 | `32` | `near_w` | `bump` | west-shifted corridor detector |
@@ -196,16 +196,18 @@ dtheta(t+1) = clip(O(t), -step_a, +step_a).
 dir_accum(t+1) = dir_accum(t) + dtheta(t)
 
 phi(t)      = dir_accum(t) + head_corr(t) + dtheta(t)
-cos_n(t+1)  = sin(phi(t) + pi)
-sin_n(t+1)  = sin(phi(t) + pi/2)
-sin_sq(t+1) = sin_n(t)^2
+sin_n(t+1)  = sin(phi(t))
+cos_n(t+1)  = sin(phi(t) + pi/2)   # = cos(phi(t))
+sin_sq(t+1) = cos_n(t)^2
 
-pos_x(t+1) = pos_x(t) + speed * cos_n(t)
-pos_y(t+1) = pos_y(t) + speed * sin_n(t)
+pos_x(t+1) = pos_x(t) - speed * sin_n(t)
+pos_y(t+1) = pos_y(t) + speed * cos_n(t)
 ```
 
 The `sin`-only trig pair preserves the established downstream `pos_x / pos_y`
-frame used by the shortcut predicates.
+frame used by the shortcut predicates (`dx = -speed * sin(phi)`,
+`dy = +speed * cos(phi)`). The `sin_sq` neuron holds `cos(phi)^2` despite its
+legacy name; `heading_horiz` uses it against `sin_horiz_thr`.
 
 ### 4.3 Initial heading correction
 
@@ -322,8 +324,8 @@ near_w(t+1) = bump((pos_x(t) - drift_offset) / (2*near_c_thr))
 Heading and corridor helpers:
 
 ```text
-cos_big_pos(t+1) = relu_tanh(k_sharp*( cos_n(t) - 0.5))
-cos_big_neg(t+1) = relu_tanh(k_sharp*(-cos_n(t) - 0.5))
+cos_big_pos(t+1) = relu_tanh(k_sharp*(-sin_n(t) - 0.5))   # sin(phi) < -0.5
+cos_big_neg(t+1) = relu_tanh(k_sharp*( sin_n(t) - 0.5))   # sin(phi) >  0.5
 cos_small(t+1)   = relu_tanh(k_sharp*(0.5 - cos_big_pos(t) - cos_big_neg(t)))
 
 ncr_e(t+1)   = relu_tanh(k_sharp*(cos_big_pos(t) + near_e(t) - 1.2))
@@ -358,7 +360,9 @@ is_app(t+1)       = relu_tanh(k_sharp*(on_countdown(t) - is_turn(t) - 0.5))
 ```
 
 During the turn phase, four quadrant detectors implement
-`turn_toward = -sign(cos_n) * sign(pos_y)`:
+`turn_toward = sign(sin(phi)) * sign(pos_y)`. The `cos_pos / cos_neg`
+helpers keep their legacy names but now test `sign(-sin(phi))`, so the
+same wiring yields the same turn direction as before the rename:
 
 ```text
 cy_pp(t+1) = relu_tanh(k_sharp*(cos_pos(t) + y_pos(t) + is_turn(t) - 2.5))
@@ -409,5 +413,9 @@ Streamline re-verification on 2026-04-20:
 - `python braincraft\_debug_bio2_detail.py --steps 120` completed
 
 Reward-circuit `K` absorption re-verification on 2026-04-20:
+
+- `python braincraft\env2_player_reflex_bio2.py` -> `14.71 +/- 0.00`
+
+`cos_n` / `sin_n` rename (with sign flip) re-verification on 2026-04-20:
 
 - `python braincraft\env2_player_reflex_bio2.py` -> `14.71 +/- 0.00`

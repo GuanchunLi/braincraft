@@ -82,8 +82,8 @@ def _bio2_indices(n_rays):
         "sc_countdown": 17,
         "shortcut_steer": 18,
         "init_impulse": 19,
-        "cos_n": 20,
-        "sin_n": 21,
+        "sin_n": 20,
+        "cos_n": 21,
         "sin_sq": 22,
         "cos_pos": 23,
         "cos_neg": 24,
@@ -146,7 +146,7 @@ def make_activation(a, idx):
         idx["l_ev"],
         idx["r_ev"],
     ]
-    sin_list = [idx["cos_n"], idx["sin_n"]]
+    sin_list = [idx["sin_n"], idx["cos_n"]]
     square_list = [idx["sin_sq"]]
     relu_list = [idx["energy_ramp"], idx["sc_countdown"]]
     bump_list = [idx["near_c"], idx["near_e"], idx["near_w"]]
@@ -233,8 +233,8 @@ def reflex_bio2_player():
     FBN      = idx["front_block_neg"]
     SHORTCUT_STEER = idx["shortcut_steer"]
     INIT_IMPULSE   = idx["init_impulse"]
-    COS_N    = idx["cos_n"]
     SIN_N    = idx["sin_n"]
+    COS_N    = idx["cos_n"]
     SIN_SQ   = idx["sin_sq"]
     COS_POS  = idx["cos_pos"]
     COS_NEG  = idx["cos_neg"]
@@ -308,12 +308,12 @@ def reflex_bio2_player():
     W[DIR_ACCUM, DTHETA] = 1.0
     # Position accumulators.
     # No hit-gating: drift during transient hits is negligible.
-    # Under trig option 2A both neurons use the sin activation, but the
-    # biases preserve the current downstream frame exactly.
+    # The env frame uses dx = -speed * sin(phi), dy = +speed * cos(phi),
+    # hence the -speed weight on sin_n.
     W[POS_X, POS_X] = 1.0
-    W[POS_X, COS_N] = speed
+    W[POS_X, SIN_N] = -speed
     W[POS_Y, POS_Y] = 1.0
-    W[POS_Y, SIN_N] = speed
+    W[POS_Y, COS_N] = speed
     # Initial heading correction latch.
     # Bio1 latches the initial correction from step 0 onward. Here
     # head_corr self-recurs and is seeded by seed_pos/seed_neg before
@@ -429,19 +429,22 @@ def reflex_bio2_player():
 
     Wout[0, FBP] = front_gain_mag
     Wout[0, FBN] = -front_gain_mag
-    # Trig neurons (sin-only activation, preserved output frame).
-    for idx_trig in (COS_N, SIN_N):
+    # Trig neurons (sin-only activation).
+    # sin_n = sin(phi), cos_n = sin(phi + pi/2) = cos(phi).
+    for idx_trig in (SIN_N, COS_N):
         W[idx_trig, DIR_ACCUM] = 1.0
         W[idx_trig, HEAD_CORR] = 1.0
         W[idx_trig, DTHETA] = 1.0
-    Win[COS_N, bias_idx] = np.pi
-    Win[SIN_N, bias_idx] = np.pi / 2
+    Win[COS_N, bias_idx] = np.pi / 2
     # Magnitude/sign helpers.
-    W[SIN_SQ, SIN_N] = 1.0
+    # sin_sq stores cos(phi)^2; heading_horiz uses it against sin_horiz_thr.
+    W[SIN_SQ, COS_N] = 1.0
 
-    # COS_POS/COS_NEG only feed quadrant sign logic, so saturation is fine.
-    W[COS_POS, COS_N] =  k_sharp
-    W[COS_NEG, COS_N] = -k_sharp
+    # COS_POS/COS_NEG feed the shortcut quadrant logic, which keys off the
+    # sign of -sin(phi) (the old cos_n) rather than true cos(phi). Hence the
+    # wiring to sin_n with flipped signs.
+    W[COS_POS, SIN_N] = -k_sharp
+    W[COS_NEG, SIN_N] =  k_sharp
 
     # Y_POS/Y_NEG feed quadrant sign logic as sign(y) - saturation OK.
     W[Y_POS, POS_Y] = k_sharp
@@ -460,11 +463,13 @@ def reflex_bio2_player():
     W[FC, FBN] = -k_sharp
     Win[FC, bias_idx] =  k_sharp * 0.1
     # near_cr helpers.
-    # COS_BIG_POS: cos > 0.5 (sharp).
-    W[COSBP, COS_N] =  k_sharp
+    # COS_BIG_POS / COS_BIG_NEG test sign of -sin(phi) against 0.5, matching the
+    # legacy "old cos_n" convention used by the corridor quadrant logic.
+    # COS_BIG_POS: -sin(phi) > 0.5  (i.e. sin(phi) < -0.5).
+    W[COSBP, SIN_N] = -k_sharp
     Win[COSBP, bias_idx] = -0.5 * k_sharp
-    # COS_BIG_NEG: cos < -0.5.
-    W[COSBN, COS_N] = -k_sharp
+    # COS_BIG_NEG: -sin(phi) < -0.5  (i.e. sin(phi) > 0.5).
+    W[COSBN, SIN_N] =  k_sharp
     Win[COSBN, bias_idx] = -0.5 * k_sharp
 
     # Offset corridor detectors.
