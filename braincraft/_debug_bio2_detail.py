@@ -16,6 +16,15 @@ def _get_value(X, idx_map, key, default=None):
     return float(X[idx, 0])
 
 
+def _get_value_or_index(X, idx_map, key, fallback_idx=None, default=None):
+    value = _get_value(X, idx_map, key, default=None)
+    if value is not None:
+        return value
+    if fallback_idx is not None:
+        return float(X[fallback_idx, 0])
+    return default
+
+
 def _format_optional(value, fmt):
     if value is None:
         return "n/a"
@@ -49,10 +58,9 @@ def trace_player(model_iter, label, n_steps=20, seed=12345, bio2_idx=None):
         X_new = (1-leak)*X + leak*f(pre)
         O = (W_out @ g(X_new)).item()
 
-        x10 = float(X_new[10, 0])
-        x11 = float(X_new[11, 0])
-        x19 = float(X_new[19, 0])
-        x22 = float(X_new[22, 0])
+        pos_x = _get_value_or_index(X_new, bio2_idx, "pos_x", fallback_idx=10)
+        pos_y = _get_value_or_index(X_new, bio2_idx, "pos_y", fallback_idx=11)
+        sc_count = _get_value_or_index(X_new, bio2_idx, "sc_countdown", fallback_idx=22)
         if bio2_idx is not None:
             cosn = _get_value(X_new, bio2_idx, "cos_n")
             cosbp = _get_value(X_new, bio2_idx, "cos_big_pos")
@@ -65,26 +73,26 @@ def trace_player(model_iter, label, n_steps=20, seed=12345, bio2_idx=None):
                 near_w = _get_value(X_new, bio2_idx, "xw_pos")
             ncre = _get_value(X_new, bio2_idx, "ncr_e")
             ncrw = _get_value(X_new, bio2_idx, "ncr_w")
-            nc = _get_value(X_new, bio2_idx, "near_center")
-            ncorr = _get_value(X_new, bio2_idx, "near_corr")
+            nc = _get_value(X_new, bio2_idx, "near_c")
+            ncorr = _get_value(X_new, bio2_idx, "near_cr")
             hh = _get_value(X_new, bio2_idx, "heading_horiz")
             fc = _get_value(X_new, bio2_idx, "front_clear")
             tsc = _get_value(X_new, bio2_idx, "trig_sc")
             ist = _get_value(X_new, bio2_idx, "is_turn")
-            sc = _get_value(X_new, bio2_idx, "shortcut_steer", 0.0)
+            shortcut = _get_value(X_new, bio2_idx, "shortcut_steer", 0.0)
             init = _get_value(X_new, bio2_idx, "init_impulse", 0.0)
-            x20 = sc + init
-            print(f"{t:3d} X10={x10:+.3f} cosN={cosn:+.3f} CBP={cosbp:.1f} CBN={cosbn:.1f} "
+            shortcut_sum = shortcut + init
+            print(f"{t:3d} pos_x={pos_x:+.3f} cos_n={cosn:+.3f} CBP={cosbp:.1f} CBN={cosbn:.1f} "
                   f"NE={_format_optional(near_e, '.1f')} NW={_format_optional(near_w, '.1f')} "
-                  f"NCE={ncre:.1f} NCW={ncrw:.1f} NCR={ncorr:.1f} "
-                  f"HH={hh:.1f} FC={fc:.1f} X22={x22:5.1f} "
+                  f"NCE={ncre:.1f} NCW={ncrw:.1f} NEAR_C={_format_optional(nc, '.1f')} NEAR_CR={ncorr:.1f} "
+                  f"HH={hh:.1f} FC={fc:.1f} sc_count={sc_count:5.1f} "
                   f"TSC={tsc:.1f} IST={ist:.1f} "
-                  f"SC={sc:+.3f} INIT={init:+.3f} SUM={x20:+.3f} "
+                  f"shortcut={shortcut:+.3f} init={init:+.3f} sum={shortcut_sum:+.3f} "
                   f"O={O:+.3f} pos=({bot.position[0]:.3f},{bot.position[1]:.3f}) dir={np.degrees(bot.direction):.1f}")
         else:
-            x20 = float(X_new[20, 0])
-            print(f"{t:3d} X10={x10:+.3f} X11={x11:+.3f} X19={x19:6.1f} X22={x22:5.1f} "
-                  f"X20={x20:+.3f} O={O:+.3f} pos=({bot.position[0]:.3f},{bot.position[1]:.3f}) dir={np.degrees(bot.direction):.1f}")
+            shortcut = _get_value_or_index(X_new, bio2_idx, "shortcut_steer", fallback_idx=20, default=0.0)
+            print(f"{t:3d} pos_x={pos_x:+.3f} pos_y={pos_y:+.3f} sc_count={sc_count:5.1f} "
+                  f"shortcut={shortcut:+.3f} O={O:+.3f} pos=({bot.position[0]:.3f},{bot.position[1]:.3f}) dir={np.degrees(bot.direction):.1f}")
 
         X = X_new
         bot.forward(np.array([[O]]), environment)

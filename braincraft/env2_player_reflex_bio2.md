@@ -2,508 +2,402 @@
 
 ## 1. Overview
 
-[env2_player_reflex_bio2.py](env2_player_reflex_bio2.py) is the
-**pointwise-activation** version of the env2 bio controller. It preserves the
-behaviour of the earlier `env2_player_reflex_bio.py` but replaces every
-per-neuron Python branch with a fixed scalar activation drawn from a small
-library. Once built, the controller is a pure reservoir:
+`env2_player_reflex_bio2.py` is the pointwise-activation version of the env2
+bio controller. After construction, all runtime logic is carried by fixed
+scalar activations plus weights in `Win` and `W`:
 
 ```text
-X[t+1] = f( Win · I[t] + W · X[t] )
-O[t+1] = Wout · g( X[t+1] )      (scalar steering command)
+X(t+1) = f(Win @ I(t) + W @ X(t))
+O(t+1) = Wout @ g(X(t+1))
 ```
 
-In the simulator loop, the state update uses the previous state and current
-input, the readout is then computed from the updated state, and `O` is passed
-to `bot.forward()`. The actuator clips that command to the allowed `[-5 deg,
-+5 deg]` range.
+with identity readout `g(x) = x`.
 
-with `n = 1000` neurons, `p = 64` color rays, `n_inputs = 2 p + 3 = 131`
-(proximity[0..p-1], color[0..p-1], hit, energy, bias=1), `warmup = 0`,
-`leak = 1`, and identity readout `g(x) = x`.
+The concrete build uses:
 
-Verification command:
+- `n = 1000` hidden units
+- `p = 64` camera rays
+- `n_inputs = 2*p + 3 = 131`
+- `warmup = 0`
+- `leak = 1`
+- actuator clip `step_a = 5 deg`
 
-```powershell
-python braincraft\env2_player_reflex_bio2.py
-```
-
-Accepted score on 2026-04-17: **14.71 +/- 0.00**.
-
----
+The controller keeps the accepted env2 behavior while expressing the reward
+logic, shortcut state machine, trig helpers, and position tracking as fixed
+neurons with fixed activations.
 
 ## 2. Activation Library
 
-Every hidden neuron uses a fixed scalar activation. For `z = (Win·I + W·X)[i]`,
-`out[i] = f_i(z)` where `f_i` is one of:
+For each neuron preactivation `z_i(t)`, the hidden update applies a fixed
+scalar function `f_i`:
 
-| Name        | Formula                       | Main role                                     |
-| ----------- | ----------------------------- | --------------------------------------------- |
-| `relu_tanh` | `max(0, tanh(z))`             | default; thresholds, latches, AND/OR gates    |
-| `identity` | `z`                           | accumulators and signed passthrough state    |
-| `relu`      | `max(0, z)`                   | counters (`X19`, `X22`) that may exceed 1     |
-| `clip_a`    | `clip(z, -a, a)` with `a=5 deg` | steering output `X6`                         |
-| `sin`       | `sin(z)`                      | trig pair `cos_n`, `sin_n`                    |
-| `square`    | `z^2`                         | exact `sin^2` magnitude test                  |
-| `bump`      | `max(0, 1 - 4 z^2)`           | compact-support detectors                     |
+| Name | Formula | Used by |
+| --- | --- | --- |
+| `relu_tanh` | `max(0, tanh(z))` | default thresholds, gates, latches |
+| `identity` | `z` | `dir_accum`, `pos_x`, `pos_y`, `head_corr`, `shortcut_steer`, `init_impulse`, `evidence`, `l_ev`, `r_ev` |
+| `relu` | `max(0, z)` | `energy_ramp`, `sc_countdown` |
+| `clip_a` | `clip(z, -step_a, step_a)` | `dtheta` |
+| `sin` | `sin(z)` | `cos_n`, `sin_n` |
+| `square` | `z^2` | `sin_sq` |
+| `bump` | `max(0, 1 - 4 z^2)` | `near_c`, `near_e`, `near_w`, `xi_blue[*]` |
 
-The bump function has support `|z| < 0.5` with `bump(0) = 1`. It is used by:
-
-- `xi_blue[r]` (centered on color value 4),
-- `near_center` (centered on `X10 = 0`),
-- `near_e`, `near_w` (centered on `X10 = -/+ DRIFT_OFFSET`).
-
-Sharp logic gates use the default `relu_tanh` with a large gain
-`K_SHARP = 50`, so `relu_tanh(K_SHARP · (x - thr))` saturates to ~1 for
-`x > thr` and to 0 for `x < thr`.
-
-Constants:
+Module constants:
 
 ```text
-SHORTCUT_TURN    = -2.0
-SIN_HORIZ_THR    = 0.35
-SIN_VERT_THR     = 0.70   (legacy, no longer read)
-NEAR_CENTER_THR  = 0.05
-DRIFT_OFFSET     = 0.175
-TURN_STEPS       = 18
-APPROACH_STEPS   = 45
-SC_TOTAL         = TURN_STEPS + APPROACH_STEPS = 63
-COLOR_EVIDENCE_THRESHOLD = 2.0
-FRONT_GAIN_MAG   = 20 deg (radians)
-GATE_C           = 1.0
-K_SHARP          = 50
-STEP_A           = 5 deg (radians)
-cal_gain         = 1 / 0.173
+shortcut_turn      = -2.0
+sin_horiz_thr      = 0.35
+near_c_thr         = 0.05
+drift_offset       = 0.175
+turn_steps         = 18
+approach_steps     = 45
+sc_total           = 63
+color_evidence_thr = 2.0
+front_gain_mag     = 20 deg
+gate_c             = 1.0
+k_sharp            = 50.0
+step_a             = 5 deg
+cal_gain           = 1 / 0.173
 ```
 
----
+## 3. Inputs and Allocator
 
-## 3. Input Vector and Fixed Slots
-
-The environment provides `I = [prox[0..p-1], color[0..p-1], hit, energy, 1]`.
-Ray-bank aliases used below:
+The input vector is
 
 ```text
-L_idx          = 20        (left proximity tap)
-R_idx          = 43        (right proximity tap, = p - 1 - L_idx)
-left_side_idx  = 11        (left safety ray)
-right_side_idx = 52        (right safety ray)
-C1_idx, C2_idx = 31, 32    (central front proximity pair)
+I(t) = [prox[0..63](t), color[0..63](t), hit(t), energy(t), 1].
+```
+
+Ray aliases used by the controller:
+
+```text
+L_idx          = 20
+R_idx          = 43
+left_side_idx  = 11
+right_side_idx = 52
+C1_idx, C2_idx = 31, 32
 hit_idx        = 128
 energy_idx     = 129
 bias_idx       = 130
 ```
 
-Neuron slots:
+Live bio2 slots in allocator order:
 
-| Slot       | Neuron                 | Activation   |
-| ---------- | ---------------------- | ------------ |
-| `0..4`     | reflex features        | `relu_tanh`  |
-| `5`        | unused                 | (unused)     |
-| `6`        | steering `dtheta`      | `clip_a`     |
-| `7`        | direction accumulator  | `identity`   |
-| `8, 9`     | unused                 | (unused)     |
-| `10, 11`   | `(x, y)` position      | `identity`   |
-| `12`       | unused                 | (unused)     |
-| `13`       | initial-heading latch  | `identity`   |
-| `14`       | parity correction tap  | `identity`   |
-| `15..18`   | reward circuit         | `relu_tanh`  |
-| `19`       | unused (legacy)        | (unused)     |
-| `20`       | `shortcut_steer`       | `identity`   |
-| `22`       | shortcut countdown     | `relu`       |
-| `23`       | `init_impulse`         | `identity`   |
-| `24`       | seeded flag            | `relu_tanh`  |
-| `25..88`   | `xi_blue[0..63]`       | `bump`       |
-| `89..132`  | helpers (see §4)       | mixed        |
-
-Helper layout (no red-fallback bank):
-
-| Range       | Meaning                                                                             |
-| ----------- | ----------------------------------------------------------------------------------- |
-| `89..99`    | `l_ev, r_ev, dleft, dright, evidence, trig_pos, trig_neg, fs_pos, fs_neg, x5_pos, x5_neg` |
-| `100..101`  | `cos_n, sin_n`                                                                      |
-| `102..106`  | `sin_sq, cos_pos, cos_neg, y_pos, y_neg`                                            |
-| `107..110`  | `near_center, heading_horiz, front_clear, trig_sc`                                  |
-| `111..113`  | `on_22, is_turn, is_app`                                                            |
-| `114, 115`  | `seed_pos, seed_neg`                                                                |
-| `116..119`  | `cy_pp, cy_pn, cy_np, cy_nn`                                                        |
-| `120..128`  | `cos_big_pos, cos_big_neg, near_e, near_w, ncr_e, ncr_w, cos_small, ncr_c, near_corr` |
-
----
+| Slot | Key | Activation | Role |
+| --- | --- | --- | --- |
+| `0` | `hit_feat` | `relu_tanh` | hit reflex feature |
+| `1` | `prox_left` | `relu_tanh` | left proximity reflex feature |
+| `2` | `prox_right` | `relu_tanh` | right proximity reflex feature |
+| `3` | `safe_left` | `relu_tanh` | left safety feature |
+| `4` | `safe_right` | `relu_tanh` | right safety feature |
+| `5` | `dtheta` | `clip_a` | clipped delayed steering state |
+| `6` | `dir_accum` | `identity` | integrated heading state |
+| `7` | `pos_x` | `identity` | integrated x-like corridor coordinate |
+| `8` | `pos_y` | `identity` | integrated y-like corridor coordinate |
+| `9` | `head_corr` | `identity` | latched initial heading correction |
+| `10` | `seeded_flag` | `relu_tanh` | one-way seed latch |
+| `11` | `seed_pos` | `relu_tanh` | positive initial-correction pulse |
+| `12` | `seed_neg` | `relu_tanh` | negative initial-correction pulse |
+| `13` | `energy_ramp` | `relu` | energy ramp for reward trigger |
+| `14` | `armed_latch` | `relu_tanh` | reward arming latch |
+| `15` | `reward_pulse` | `relu_tanh` | reward pulse detector |
+| `16` | `reward_latch` | `relu_tanh` | latched reward signal |
+| `17` | `sc_countdown` | `relu` | shortcut countdown |
+| `18` | `shortcut_steer` | `identity` | shortcut steering term |
+| `19` | `init_impulse` | `identity` | one-step initial correction pulse |
+| `20` | `cos_n` | `sin` | sine-shifted trig helper for `pos_x` |
+| `21` | `sin_n` | `sin` | sine-shifted trig helper for `pos_y` |
+| `22` | `sin_sq` | `square` | exact `sin_n^2` magnitude |
+| `23` | `cos_pos` | `relu_tanh` | `cos_n > 0` detector |
+| `24` | `cos_neg` | `relu_tanh` | `cos_n < 0` detector |
+| `25` | `y_pos` | `relu_tanh` | `pos_y > 0` detector |
+| `26` | `y_neg` | `relu_tanh` | `pos_y < 0` detector |
+| `27` | `cos_big_pos` | `relu_tanh` | `cos_n > 0.5` detector |
+| `28` | `cos_big_neg` | `relu_tanh` | `cos_n < -0.5` detector |
+| `29` | `cos_small` | `relu_tanh` | `|cos_n| <= 0.5` detector |
+| `30` | `near_c` | `bump` | near-center corridor detector |
+| `31` | `near_e` | `bump` | east-shifted corridor detector |
+| `32` | `near_w` | `bump` | west-shifted corridor detector |
+| `33` | `ncr_e` | `relu_tanh` | `cos_big_pos AND near_e` |
+| `34` | `ncr_w` | `relu_tanh` | `cos_big_neg AND near_w` |
+| `35` | `ncr_c` | `relu_tanh` | `cos_small AND near_c` |
+| `36` | `near_cr` | `relu_tanh` | corridor predicate used by shortcut trigger |
+| `37` | `heading_horiz` | `relu_tanh` | near-horizontal heading detector |
+| `38` | `front_clear` | `relu_tanh` | no front-block detector |
+| `39` | `trig_sc` | `relu_tanh` | shortcut trigger pulse |
+| `40` | `on_countdown` | `relu_tanh` | `sc_countdown > 0.5` |
+| `41` | `is_turn` | `relu_tanh` | turn phase gate |
+| `42` | `is_app` | `relu_tanh` | approach phase gate |
+| `43` | `cy_pp` | `relu_tanh` | `cos_pos AND y_pos AND is_turn` |
+| `44` | `cy_pn` | `relu_tanh` | `cos_pos AND y_neg AND is_turn` |
+| `45` | `cy_np` | `relu_tanh` | `cos_neg AND y_pos AND is_turn` |
+| `46` | `cy_nn` | `relu_tanh` | `cos_neg AND y_neg AND is_turn` |
+| `47` | `front_block_pos` | `relu_tanh` | front block term for positive front sign |
+| `48` | `front_block_neg` | `relu_tanh` | front block term for negative front sign |
+| `49` | `l_ev` | `identity` | left-half blue evidence sum |
+| `50` | `r_ev` | `identity` | right-half blue evidence sum |
+| `51` | `dleft` | `relu_tanh` | left-dominance pulse |
+| `52` | `dright` | `relu_tanh` | right-dominance pulse |
+| `53` | `evidence` | `identity` | signed color evidence accumulator |
+| `54` | `trig_pos` | `relu_tanh` | positive evidence trigger |
+| `55` | `trig_neg` | `relu_tanh` | negative evidence trigger |
+| `56` | `fs_pos` | `relu_tanh` | latched positive front sign |
+| `57` | `fs_neg` | `relu_tanh` | latched negative front sign |
+| `58..121` | `xi_blue[0..63]` | `bump` | per-ray blue detector centered at color value `4` |
 
 ## 4. Main Circuits
 
-All formulas use the convention `*_prev` to denote the value at step `t` when
-computing step `t+1`. When the time index is unambiguous it is omitted.
+### 4.1 Reflex features and readout
 
-### 4.1 Reflex feature neurons `X0..X4` (relu_tanh)
-
-Pure feed-forward readouts of proximity/hit, with an approach-phase cancellation
-term:
+The five reflex features are feed-forward proximity/hit channels, suppressed
+during shortcut approach:
 
 ```text
-X0 = relu_tanh( hit                       - K_SHARP·100·IS_APP_prev )
-X1 = relu_tanh( prox[L_idx]               - K_SHARP·100·IS_APP_prev )
-X2 = relu_tanh( prox[R_idx]               - K_SHARP·100·IS_APP_prev )
-X3 = relu_tanh( -prox[left_side_idx]  + 0.75 - K_SHARP·100·IS_APP_prev )
-X4 = relu_tanh( -prox[right_side_idx] + 0.75 - K_SHARP·100·IS_APP_prev )
+hit_feat(t+1)   = relu_tanh(hit(t) - 100*k_sharp*is_app(t))
+prox_left(t+1)  = relu_tanh(prox[L_idx](t) - 100*k_sharp*is_app(t))
+prox_right(t+1) = relu_tanh(prox[R_idx](t) - 100*k_sharp*is_app(t))
+safe_left(t+1)  = relu_tanh(-prox[left_side_idx](t)  + 0.75 - 100*k_sharp*is_app(t))
+safe_right(t+1) = relu_tanh(-prox[right_side_idx](t) + 0.75 - 100*k_sharp*is_app(t))
 ```
 
-The large `-K_SHARP·100·IS_APP` term silences these five source neurons while
-the shortcut approach phase is active; the downstream steering output then
-reduces to `front_block + shortcut_steer`.
-
-### 4.2 Steering output `O` and `X6`
-
-The scalar readout and its clipped lagged copy used inside the recurrence:
+The steering readout is
 
 ```text
-O = Wout · g(X)
-  = Wout · X
-  =  hit_turn           · X0
-  +  heading_gain       · X1
-  + (-heading_gain)     · X2
-  +  safety_gain_left   · X3
-  +  safety_gain_right  · X4
-  + FRONT_GAIN_MAG · X5P  - FRONT_GAIN_MAG · X5N
-  + 1.0 · shortcut_steer
-  + 1.0 · init_impulse
+O(t+1) =
+    hit_turn          * hit_feat(t+1)
+  + heading_gain      * prox_left(t+1)
+  - heading_gain      * prox_right(t+1)
+  + safety_gain_left  * safe_left(t+1)
+  + safety_gain_right * safe_right(t+1)
+  + front_gain_mag    * front_block_pos(t+1)
+  - front_gain_mag    * front_block_neg(t+1)
+  + shortcut_steer(t+1)
+  + init_impulse(t+1)
+```
 
+with
+
+```text
 hit_turn          = -10 deg / tanh(1)
 heading_gain      = -40 deg
 safety_gain_left  = -20 deg
 safety_gain_right = +20 deg
-
-X6[t] = clip( O[t-1], -a, +a ),  a = 5 deg
 ```
 
-`X6` is implemented by copying `Wout[0,:]` into `W[6,:]` after everything else
-is wired, and applying `clip` as the activation for slot 6. This makes `X6`
-the clipped delayed steering state used by the recurrent dynamics. The
-simulator still forwards `O = Wout · g(X)` to `bot.forward()` each step, and
-the actuator applies its own clamp there as well.
-
-### 4.3 Direction and position accumulators
+The internal steering state is the clipped lagged readout:
 
 ```text
-X7  = X7_prev + X6_prev                                    (identity)
-
-phi = X7 + X13 + X6
-cos_n = sin( phi + pi     ) = -sin(phi)                    (sin activation)
-sin_n = sin( phi + pi / 2 ) =  cos(phi)                    (sin activation)
-
-X10 = X10_prev + speed · cos_n_prev                        (identity)
-X11 = X11_prev + speed · sin_n_prev                        (identity)
+dtheta(t+1) = clip(O(t), -step_a, +step_a).
 ```
 
-`speed = 0.01` (from `bot.speed`). The sign of `cos_n` is negated and `sin_n`
-is cosine-shaped; this preserves the downstream `X10 / X11` frame that all
-corridor logic was tuned against, with only the `sin` activation available
-(option 2A).
-
-### 4.4 Initial heading correction
-
-Let the raw correction at time `t` be:
+### 4.2 Direction, trig, and position
 
 ```text
-current_corr_t = (prox[R_idx] - prox[L_idx]) · cal_gain
+dir_accum(t+1) = dir_accum(t) + dtheta(t)
+
+phi(t)      = dir_accum(t) + head_corr(t) + dtheta(t)
+cos_n(t+1)  = sin(phi(t) + pi)
+sin_n(t+1)  = sin(phi(t) + pi/2)
+sin_sq(t+1) = sin_n(t)^2
+
+pos_x(t+1) = pos_x(t) + speed * cos_n(t)
+pos_y(t+1) = pos_y(t) + speed * sin_n(t)
 ```
 
-Three neurons implement the latch. `X24` saturates to 1 after step 0:
+The `sin`-only trig pair preserves the established downstream `pos_x / pos_y`
+frame used by the shortcut predicates.
+
+### 4.3 Initial heading correction
+
+The raw initial correction is
 
 ```text
-X24 = relu_tanh( 10 )         ~= 1  for t >= 1
+current_corr(t) = (prox[R_idx](t) - prox[L_idx](t)) * cal_gain.
 ```
 
-`SEEDP` / `SEEDN` are one-step pulses that fire only while `X24_prev = 0`:
+The latch is built from `seeded_flag`, `seed_pos`, `seed_neg`, and `head_corr`:
 
 ```text
-SEEDP = relu_tanh( -cal_gain · prox[L_idx] + cal_gain · prox[R_idx]
-                   - 1e3 · X24_prev )
-SEEDN = relu_tanh(  cal_gain · prox[L_idx] - cal_gain · prox[R_idx]
-                   - 1e3 · X24_prev )
+seeded_flag(t+1) = relu_tanh(10)
+seed_pos(t+1)    = relu_tanh(-cal_gain*prox[L_idx](t) + cal_gain*prox[R_idx](t) - 1000*seeded_flag(t))
+seed_neg(t+1)    = relu_tanh( cal_gain*prox[L_idx](t) - cal_gain*prox[R_idx](t) - 1000*seeded_flag(t))
+
+head_corr(t+1)   = head_corr(t) + seed_pos(t) - seed_neg(t)
+init_impulse(t+1)= -seed_pos(t) + seed_neg(t)
 ```
 
-Together `SEEDP - SEEDN` encodes the signed initial correction and closely
-approximates `current_corr_0` over the observed initialization range. Two
-neurons consume them:
+This reproduces the original latched correction with a one-step delay:
+`head_corr(0) = 0`, then the initial correction is held from `t = 1` onward.
+
+### 4.4 Reward circuit
+
+With
 
 ```text
-X13 = X13_prev + SEEDP_prev - SEEDN_prev                     (identity)
-init_impulse = -SEEDP_prev + SEEDN_prev    (~ -current_corr_0)
+K = 0.005
+arm_from_energy = 1000
+arm_latch       = 10
+pulse_gain      = 100000
+pulse_thr       = 0.2
+arm_gate        = 1000
+latch_gain      = 10
 ```
 
-`X13` carries the initial correction forever (a 1-step lag vs bio1, negligible).
-`X14` keeps the instantaneous correction signal as a parity/legacy identity
-slot, but no downstream bio2 circuit reads it. `init_impulse` is a one-step
-steering pulse delivered through `Wout` with weight `1.0`.
-
-### 4.5 Color evidence (blue bump detectors)
-
-For each ray `r = 0..n_rays-1`:
+the reward neurons satisfy
 
 ```text
-xi_blue[r] = bump( color[r] - 4 )
-           = max( 0, 1 - 4 · (color[r] - 4)^2 )
+energy_ramp(t+1) = relu(K * energy(t))
+
+armed_latch(t+1) = relu_tanh(
+    arm_from_energy * energy_ramp(t)
+  + arm_latch       * armed_latch(t)
+)
+
+reward_pulse(t+1) = relu_tanh(
+    pulse_gain * K * energy(t)
+  - pulse_gain     * energy_ramp(t)
+  + arm_gate       * armed_latch(t)
+  - (arm_gate + pulse_thr)
+)
+
+reward_latch(t+1) = relu_tanh(
+    latch_gain * reward_pulse(t)
+  + latch_gain * reward_latch(t)
+)
 ```
 
-The left/right evidence sums (half = 32):
+### 4.5 Blue evidence and front-block sign
+
+Each blue detector is a bump centered at color value `4`:
 
 ```text
-L_EV = sum_{r=0..half-1}     xi_blue[r]
-R_EV = sum_{r=half..n_rays-1} xi_blue[r]
+xi_blue[r](t+1) = bump(color[r](t) - 4).
 ```
 
-No `xi_red` fallback is wired in the accepted controller.
-
-### 4.6 Gated delta pulses and signed evidence integrator
+The left and right evidence sums use the two ray halves:
 
 ```text
-DLEFT  = relu_tanh( K_SHARP · L_EV  - K_SHARP · R_EV
-                    - K_SHARP · 10 · (FS_P_prev + FS_N_prev)
-                    - 0.2 · K_SHARP )
-
-DRIGHT = relu_tanh( -K_SHARP · L_EV  + K_SHARP · R_EV
-                    - K_SHARP · 10 · (FS_P_prev + FS_N_prev)
-                    - 0.2 · K_SHARP )
-
-EVIDENCE = EVIDENCE_prev + DRIGHT_prev - DLEFT_prev     (identity)
+l_ev(t+1) = sum_{r=0}^{31}  xi_blue[r](t)
+r_ev(t+1) = sum_{r=32}^{63} xi_blue[r](t)
 ```
 
-The big `-K_SHARP·10·FS_*` term forces `DLEFT, DRIGHT -> 0` once a front sign
-has latched.
-
-### 4.7 Front-sign triggers and self-latches
+Dominance pulses and the signed integrator:
 
 ```text
-TP = relu_tanh(  K_SHARP · EVIDENCE_prev
-                - K_SHARP · (COLOR_EVIDENCE_THRESHOLD - 0.5) )
-TN = relu_tanh( -K_SHARP · EVIDENCE_prev
-                - K_SHARP · (COLOR_EVIDENCE_THRESHOLD - 0.5) )
+dleft(t+1)  = relu_tanh(k_sharp*(l_ev(t) - r_ev(t) - 0.2) - 10*k_sharp*fs_pos(t) - 10*k_sharp*fs_neg(t))
+dright(t+1) = relu_tanh(k_sharp*(r_ev(t) - l_ev(t) - 0.2) - 10*k_sharp*fs_pos(t) - 10*k_sharp*fs_neg(t))
 
-FS_P = relu_tanh( K_SHARP · FS_P_prev + K_SHARP · TP_prev )
-FS_N = relu_tanh( K_SHARP · FS_N_prev + K_SHARP · TN_prev )
+evidence(t+1) = evidence(t) + dright(t) - dleft(t)
+trig_pos(t+1) = relu_tanh(k_sharp*(evidence(t) - (color_evidence_thr - 0.5)))
+trig_neg(t+1) = relu_tanh(k_sharp*(-evidence(t) - (color_evidence_thr - 0.5)))
+
+fs_pos(t+1) = relu_tanh(k_sharp*fs_pos(t) + k_sharp*trig_pos(t))
+fs_neg(t+1) = relu_tanh(k_sharp*fs_neg(t) + k_sharp*trig_neg(t))
 ```
 
-Each `FS_*` latch is self-recurrent with gain `K_SHARP`, so once set it stays
-saturated at 1.
-
-### 4.8 Front-block gating `X5_POS` / `X5_NEG`
+The gated front-block channels use the two center proximity taps:
 
 ```text
-front_raw = prox[C1_idx] + prox[C2_idx]
-
-X5P = relu_tanh( front_raw - (front_thr + GATE_C)
-                 + GATE_C · FS_P_prev - GATE_C · FS_N_prev )
-X5N = relu_tanh( front_raw - (front_thr + GATE_C)
-                 - GATE_C · FS_P_prev + GATE_C · FS_N_prev )
-
-front_thr = 1.4,  GATE_C = 1.0
+front_block_pos(t+1) = relu_tanh(C1(t) + C2(t) - (front_thr + gate_c) + gate_c*fs_pos(t) - gate_c*fs_neg(t))
+front_block_neg(t+1) = relu_tanh(C1(t) + C2(t) - (front_thr + gate_c) - gate_c*fs_pos(t) + gate_c*fs_neg(t))
 ```
 
-Effectively `X5P` fires when the front is blocked AND `FS_P` is latched; `X5N`
-mirrors for `FS_N`. These feed `Wout` with `+FRONT_GAIN_MAG` and
-`-FRONT_GAIN_MAG` respectively.
+with `front_thr = 1.4`.
 
-### 4.9 Magnitude and sign helpers
+### 4.6 Corridor tests and shortcut trigger
+
+The bump-based corridor detectors are driven by `pos_x`:
 
 ```text
-SIN_SQ   = (SIN_N_prev)^2                       (square)
-
-COS_POS  = relu_tanh(  K_SHARP · COS_N_prev )
-COS_NEG  = relu_tanh( -K_SHARP · COS_N_prev )
-Y_POS    = relu_tanh(  K_SHARP · X11_prev )
-Y_NEG    = relu_tanh( -K_SHARP · X11_prev )
+near_c(t+1) = bump(pos_x(t) / (2*near_c_thr))
+near_e(t+1) = bump((pos_x(t) + drift_offset) / (2*near_c_thr))
+near_w(t+1) = bump((pos_x(t) - drift_offset) / (2*near_c_thr))
 ```
 
-### 4.10 Center and corridor bump detectors
-
-With `bump_scale = 1 / (2 · NEAR_CENTER_THR) = 10`:
+Heading and corridor helpers:
 
 ```text
-NEAR_CENTER = bump( bump_scale · X10_prev )
-            = bump( X10_prev / (2 · NEAR_CENTER_THR) )
-            (support |X10| < NEAR_CENTER_THR = 0.05)
+cos_big_pos(t+1) = relu_tanh(k_sharp*( cos_n(t) - 0.5))
+cos_big_neg(t+1) = relu_tanh(k_sharp*(-cos_n(t) - 0.5))
+cos_small(t+1)   = relu_tanh(k_sharp*(0.5 - cos_big_pos(t) - cos_big_neg(t)))
 
-NEAR_E      = bump( bump_scale · X10_prev + DRIFT_OFFSET · bump_scale )
-            = bump( (X10_prev + DRIFT_OFFSET) / (2 · NEAR_CENTER_THR) )
+ncr_e(t+1)   = relu_tanh(k_sharp*(cos_big_pos(t) + near_e(t) - 1.2))
+ncr_w(t+1)   = relu_tanh(k_sharp*(cos_big_neg(t) + near_w(t) - 1.2))
+ncr_c(t+1)   = relu_tanh(k_sharp*(cos_small(t)   + near_c(t) - 1.2))
+near_cr(t+1) = relu_tanh(k_sharp*(ncr_e(t) + ncr_w(t) + ncr_c(t) - 0.5))
 
-NEAR_W      = bump( bump_scale · X10_prev - DRIFT_OFFSET · bump_scale )
-            = bump( (X10_prev - DRIFT_OFFSET) / (2 · NEAR_CENTER_THR) )
+heading_horiz(t+1) = relu_tanh(k_sharp*(1 - sin_sq(t) / sin_horiz_thr^2))
+front_clear(t+1)   = relu_tanh(k_sharp*(0.1 - front_block_pos(t) - front_block_neg(t)))
 ```
 
-### 4.11 Heading predicate
-
-Only the horizontal-heading test is used by the downstream trigger; the former
-`heading_vert` (`HV`) neuron was removed together with the step counter it
-gated.
+The shortcut trigger is a 4-way AND with refractory feedback:
 
 ```text
-HH (heading_horiz) = relu_tanh( -(K_SHARP / SIN_HORIZ_THR^2) · SIN_SQ_prev
-                                + K_SHARP )
-                   ~= 1 iff  SIN_SQ < SIN_HORIZ_THR^2 (0.1225)
+trig_sc(t+1) = relu_tanh(
+    k_sharp*(reward_latch(t) + heading_horiz(t) + front_clear(t) + near_cr(t) - 3.5)
+  - 10*k_sharp*trig_sc(t)
+  - k_sharp*sc_countdown(t)
+)
 ```
 
-### 4.12 Front-clear predicate
+### 4.7 Shortcut phases and steering
+
+The countdown and phase gates are
 
 ```text
-FC  (front_clear)   = relu_tanh( -K_SHARP · X5P_prev - K_SHARP · X5N_prev
-                                 + 0.1 · K_SHARP )
-                    ~= 1 iff  X5P + X5N < 0.1
+sc_countdown(t+1) = relu(sc_countdown(t) - 1 + (sc_total + 1) * trig_sc(t))
+
+on_countdown(t+1) = relu_tanh(k_sharp*(sc_countdown(t) - 0.5))
+is_turn(t+1)      = relu_tanh(k_sharp*(sc_countdown(t) - (approach_steps + 0.5)))
+is_app(t+1)       = relu_tanh(k_sharp*(on_countdown(t) - is_turn(t) - 0.5))
 ```
 
-The historical `SCI = 1 iff X22 < 0.5` and `ES = 1 iff X19 > COUNTER_THR`
-AND-terms of `TSC` were retired: `SCI` was redundant with the
-`-K·X22_prev` refractory (see §4.16), and `ES` turned out to have no
-empirical effect on the accepted score once the refractory was in place.
-Their supporting neurons (`X19` step counter, `NCV = near_center AND
-heading_vert`, and `HV`) were dropped in the same pass.
-
-### 4.15 `near_corr`: corridor-aware center predicate
+During the turn phase, four quadrant detectors implement
+`turn_toward = -sign(cos_n) * sign(pos_y)`:
 
 ```text
-COSBP (cos_big_pos) = relu_tanh(  K_SHARP · COS_N_prev - 0.5 · K_SHARP )
-                    ~= 1 iff  COS_N > 0.5
+cy_pp(t+1) = relu_tanh(k_sharp*(cos_pos(t) + y_pos(t) + is_turn(t) - 2.5))
+cy_pn(t+1) = relu_tanh(k_sharp*(cos_pos(t) + y_neg(t) + is_turn(t) - 2.5))
+cy_np(t+1) = relu_tanh(k_sharp*(cos_neg(t) + y_pos(t) + is_turn(t) - 2.5))
+cy_nn(t+1) = relu_tanh(k_sharp*(cos_neg(t) + y_neg(t) + is_turn(t) - 2.5))
 
-COSBN (cos_big_neg) = relu_tanh( -K_SHARP · COS_N_prev - 0.5 · K_SHARP )
-                    ~= 1 iff  COS_N < -0.5
-
-COS_SMALL = relu_tanh( -K_SHARP · COSBP_prev - K_SHARP · COSBN_prev
-                       + 0.5 · K_SHARP )
-          ~= 1 iff  |COS_N| <= 0.5
-
-NCR_E = relu_tanh( K_SHARP · COSBP_prev + K_SHARP · NEAR_E_prev
-                  - 1.2 · K_SHARP )
-NCR_W = relu_tanh( K_SHARP · COSBN_prev + K_SHARP · NEAR_W_prev
-                  - 1.2 · K_SHARP )
-NCR_C = relu_tanh( K_SHARP · COS_SMALL_prev + K_SHARP · NC_prev
-                  - 1.2 · K_SHARP )
-
-NEAR_CORR = relu_tanh( K_SHARP · NCR_E_prev + K_SHARP · NCR_W_prev
-                      + K_SHARP · NCR_C_prev - 0.5 · K_SHARP )
+shortcut_steer(t+1) =
+    abs(shortcut_turn) * (cy_pn(t) + cy_np(t) - cy_pp(t) - cy_nn(t))
 ```
 
-`NEAR_CORR` fires when the bot is near one of the three corridor centers,
-choosing the drift-offset band that matches its current heading quadrant.
+## 5. Nonzero Readout Weights
 
-### 4.16 Shortcut trigger `TSC`
-
-Four-way AND with double inhibition to prevent back-to-back firings:
+Only these hidden slots contribute directly to `Wout`:
 
 ```text
-TSC = relu_tanh( K_SHARP · X18_prev
-                 + K_SHARP · HH_prev
-                 + K_SHARP · FC_prev
-                 + K_SHARP · NEAR_CORR_prev
-                 - K_SHARP · 10 · TSC_prev   (blocks t+1)
-                 - K_SHARP · X22_prev        (blocks t+2..t+SC_TOTAL)
-                 - K_SHARP · 3.5 )
+Wout[hit_feat]        = hit_turn
+Wout[prox_left]       = heading_gain
+Wout[prox_right]      = -heading_gain
+Wout[safe_left]       = safety_gain_left
+Wout[safe_right]      = safety_gain_right
+Wout[front_block_pos] = +front_gain_mag
+Wout[front_block_neg] = -front_gain_mag
+Wout[shortcut_steer]  = +1
+Wout[init_impulse]    = +1
 ```
 
-`TSC ~ 1` iff all four positive inputs are 1 AND it has not fired recently.
-The bias `-3.5·K_SHARP` is the AND-of-4 threshold.
-
-**Refractory coverage.** The `-K·X22_prev` term alone kills the AND whenever
-`X22 >= 1`: the four positive inputs contribute at most `4·K`, the bias
-contributes `-3.5·K`, and `-K·X22_prev <= -K` drops the sum to `<= -0.5·K`,
-which saturates the `relu_tanh` to 0. At `X22 = 0` the inhibition vanishes
-and `TSC` fires when the four positive inputs align. The `-10·K·TSC_prev`
-path covers the one step between firing and loading `X22`.
-
-### 4.17 Countdown `X22` and phase indicators
-
-```text
-X22 = relu( X22_prev - 1 + (SC_TOTAL + 1) · TSC_prev )
-
-ON22  = relu_tanh(  K_SHARP · X22_prev - 0.5 · K_SHARP )
-IST   = relu_tanh(  K_SHARP · X22_prev - K_SHARP · (APPROACH_STEPS + 0.5) )
-ISA   = relu_tanh(  K_SHARP · ON22_prev - K_SHARP · IST_prev
-                   - 0.5 · K_SHARP )
-```
-
-Phase semantics: `ON22 = 1` during countdown (63 -> 0), `IST = 1` for the
-first 18 steps (turn phase), `ISA = 1` for the following 45 steps (approach
-phase).
-
-### 4.18 Quadrant ANDs and `shortcut_steer`
-
-Four 3-way ANDs with bias `-2.5·K_SHARP`:
-
-```text
-CY_PP = relu_tanh( K_SHARP · COS_POS + K_SHARP · Y_POS + K_SHARP · IST
-                  - 2.5 · K_SHARP )
-CY_PN = relu_tanh( K_SHARP · COS_POS + K_SHARP · Y_NEG + K_SHARP · IST
-                  - 2.5 · K_SHARP )
-CY_NP = relu_tanh( K_SHARP · COS_NEG + K_SHARP · Y_POS + K_SHARP · IST
-                  - 2.5 · K_SHARP )
-CY_NN = relu_tanh( K_SHARP · COS_NEG + K_SHARP · Y_NEG + K_SHARP · IST
-                  - 2.5 · K_SHARP )
-```
-
-(All inputs to each `CY_*` are read as `*_prev`.) The steering channel:
-
-```text
-shortcut_steer = |SHORTCUT_TURN| · ( CY_PN_prev + CY_NP_prev
-                                   - CY_PP_prev - CY_NN_prev )
-```
-
-This encodes the turn rule `turn_toward = -sign(cos) · sign(y)` with magnitude
-`|SHORTCUT_TURN| = 2.0`, and is gated to the turn phase by `IST`.
-
-### 4.19 Reward circuit `X15..X18`
-
-With constants `K = 0.005`, `arm_from_energy = 1000`, `arm_latch = 10`,
-`pulse_gain = 1e5`, `pulse_thr = 0.2`, `arm_gate = 1000`, `latch_gain = 10`:
-
-```text
-X15 = relu_tanh( K · energy )
-
-X16 = relu_tanh( arm_from_energy · X15_prev + arm_latch · X16_prev )
-
-X17 = relu_tanh( pulse_gain · K · energy
-                - pulse_gain · X15_prev
-                + arm_gate · X16_prev
-                - (arm_gate + pulse_thr) )
-
-X18 = relu_tanh( latch_gain · X17_prev + latch_gain · X18_prev )
-```
-
-`X18` is the armed reward latch consumed by the shortcut trigger `TSC`.
-
----
-
-## 5. Output Weight Table (`Wout`)
-
-Only these slots are nonzero:
-
-```text
-Wout[0, 0]               =  hit_turn            = -10 deg / tanh(1)
-Wout[0, 1]               =  heading_gain        = -40 deg
-Wout[0, 2]               = -heading_gain        = +40 deg
-Wout[0, 3]               =  safety_gain_left    = -20 deg
-Wout[0, 4]               =  safety_gain_right   = +20 deg
-Wout[0, X5P]             = +FRONT_GAIN_MAG      = +20 deg
-Wout[0, X5N]             = -FRONT_GAIN_MAG      = -20 deg
-Wout[0, shortcut_steer]  = +1.0
-Wout[0, init_impulse]    = +1.0
-```
-
-The clipped steering neuron `X6` reads the same row of `Wout` through a copy
-into `W[6, :]`, so `z[6] = O_{t-1}` and the recurrent state stores
-`X6 = clip(O_{t-1}, -a, a)`. The simulator then forwards the fresh readout
-`O = Wout · g(X)` to the bot each step, with the actuator clip applied in
-`bot.forward()`.
-
----
+The controller also copies this same readout row into the recurrent weights for
+`dtheta`, so `dtheta(t+1)` is the clipped version of the previous step's
+steering command.
 
 ## 6. Verification
 
-The accepted controller passes all three smoke tests:
+Smoke-test commands:
 
 ```powershell
+python braincraft\env2_player_reflex_bio2.py
 python braincraft\_debug_bio2.py --steps 120 --stride 20
 python braincraft\_debug_bio2_detail.py --steps 120
-python braincraft\env2_player_reflex_bio2.py
 ```
 
-with a final env2 score of `14.71 +/- 0.00`.
+Accepted env2 score on 2026-04-17: `14.71 +/- 0.00`.
+
+Streamline re-verification on 2026-04-20:
+
+- `python braincraft\env2_player_reflex_bio2.py` -> `14.71 +/- 0.00`
+- `python braincraft\_debug_bio2.py --steps 120 --stride 20` completed
+- `python braincraft\_debug_bio2_detail.py --steps 120` completed

@@ -4,57 +4,30 @@
 """
 Reflex Bio Player 2 for Environment 2.
 
-Same behaviour as env2_player_reflex_bio.py but more biologically
-plausible:
+Constants use snake_case; hidden-state aliases use UPPER_SNAKE.
 
-  * The activation function f(x) is a purely pointwise per-neuron map
-    - each out[i] depends only on x[i] and a fixed per-neuron choice
-    from a small library of simple scalar functions:
+This is the pointwise-activation version of the env2 bio controller.
+After construction, all runtime logic is carried by fixed scalar
+activations plus weights in Win and W:
 
-        relu_tanh  : max(0, tanh(z))       (default, thresholding)
-        identity   : z                     (accumulators, passthrough)
-        relu       : max(0, z)             (counters that grow > 1)
-        clip_a     : clip(z, -a, a)        (dtheta output)
-        sin        : np.sin(z)             (trig neurons)
-        square     : z*z                   (magnitude tests)
-        bump       : max(0, 1 - 4*z*z)     (compact support detector)
+    X(t+1) = f(Win @ I(t) + W @ X(t))
+    O(t+1) = Wout @ g(X(t+1))
 
-  * All non-pointwise computations that used to live inside the Python
-    activation (gating, latches, state machines, trigonometry, position
-    updates, shortcut switching) are expressed with extra helper neurons
-    and weights in Win / W. No runtime Python logic influences the
-    dynamics - the network is a pure reservoir: X <- f(Win·I + W·X).
+with identity readout g(x) = x.
 
-The behaviour should be close to the original bio player.  Some circuits
-introduce an extra 1–2 step delay compared to the in-f version; this is
-negligible given the slow time-scales of wall-following (~1000 steps
-per run).
+The dense bio2 layout is grouped as:
 
-Neuron layout (selected):
+  0..4   reflex features
+  5..8   dtheta, dir_accum, pos_x, pos_y
+  9..12  initial-heading correction latch
+  13..19 reward and shortcut state
+  20..39 trig, corridor, and shortcut-trigger helpers
+  40..57 shortcut-phase, front-block, and color-evidence helpers
+  58..   xi_blue ray bank
 
-  X0..X4    : reflex sensor features (relu_tanh)
-  X5        : unused legacy slot
-  X6        : dtheta output      (clip to ±a)
-  X7        : direction accum.   (identity)
-  X8, X9    : unused legacy slots
-  X10, X11  : position x / y     (identity)
-  X12       : unused legacy slot
-  X13, X14  : correction latch / instantaneous (identity)
-  X15..X18  : reward circuit     (relu_tanh)
-  X19       : unused legacy slot (former step counter)
-  X20       : shortcut_steer     (identity)
-  X22       : shortcut countdown (relu)
-  X23       : init_impulse       (identity)
-  X24       : seeded flag        (relu_tanh)
-  X25..     : xi_blue (+ xi_red only if kept), then bio helpers
-
-The trig pair keeps the current output semantics while using only the
-`sin` activation. This preserves the established corridor logic and the
-rotated X10/X11 frame used by the downstream predicates.
-
-The shortcut state machine and the initial-heading correction are
-expressed as networks of thresholded rt neurons with sharp gains so
-their behaviour approximates the logical ifs of the original.
+The trig pair preserves the established pos_x / pos_y frame while using
+only the sin activation, and the shortcut state machine is expressed
+with thresholded helper neurons instead of Python control flow.
 """
 
 import numpy as np
@@ -67,108 +40,91 @@ from environment_2 import Environment
 
 
 # ── Shortcut circuit parameters ────────────────────────────────────
-SHORTCUT_TURN    = -2.0
-SIN_HORIZ_THR    = 0.35
-SIN_VERT_THR     = 0.70
-COUNTER_THR      = 60
-NEAR_CENTER_THR  = 0.05
-DRIFT_OFFSET     = 0.175
-TURN_STEPS       = 18
-APPROACH_STEPS   = 45
-SC_TOTAL         = TURN_STEPS + APPROACH_STEPS
+shortcut_turn = -2.0
+sin_horiz_thr = 0.35
+near_c_thr = 0.05
+drift_offset = 0.175
+turn_steps = 18
+approach_steps = 45
+sc_total = turn_steps + approach_steps
 
 # ── Bio-specific constants ─────────────────────────────────────────
-COLOR_EVIDENCE_THRESHOLD = 2.0
-FRONT_GAIN_MAG   = np.radians(20.0)
-GATE_C           = 1.0
-USE_XI_RED_FALLBACK = False
+color_evidence_thr = 2.0
+front_gain_mag   = np.radians(20.0)
+gate_c           = 1.0
 
 # Sharp-threshold gain for crisp AND / OR / latch circuits.
-K_SHARP = 50.0     # large enough to saturate tanh near |z|>0.1
-STEP_A  = np.radians(5.0)
+k_sharp = 50.0     # large enough to saturate tanh near |z|>0.1
+step_a  = np.radians(5.0)
 
 
 # ── Neuron index layout ────────────────────────────────────────────
-def _bio2_indices(n_rays, use_xi_red=False):
+def _bio2_indices(n_rays):
     """Sequential neuron indices for the bio2 layout."""
-    xi_blue_start = 25
-    xi_blue_stop  = xi_blue_start + n_rays
-
-    i = xi_blue_stop
     idx = {
-        "shortcut_steer": 20,
-        "init_impulse": 23,
-        "xi_blue_start": xi_blue_start,
-        "xi_blue_stop": xi_blue_stop,
-        "half": n_rays // 2,
+        "hit_feat": 0,
+        "prox_left": 1,
+        "prox_right": 2,
+        "safe_left": 3,
+        "safe_right": 4,
+        "dtheta": 5,
+        "dir_accum": 6,
+        "pos_x": 7,
+        "pos_y": 8,
+        "head_corr": 9,
+        "seeded_flag": 10,
+        "seed_pos": 11,
+        "seed_neg": 12,
+        "energy_ramp": 13,
+        "armed_latch": 14,
+        "reward_pulse": 15,
+        "reward_latch": 16,
+        "sc_countdown": 17,
+        "shortcut_steer": 18,
+        "init_impulse": 19,
+        "cos_n": 20,
+        "sin_n": 21,
+        "sin_sq": 22,
+        "cos_pos": 23,
+        "cos_neg": 24,
+        "y_pos": 25,
+        "y_neg": 26,
+        "cos_big_pos": 27,
+        "cos_big_neg": 28,
+        "cos_small": 29,
+        "near_c": 30,
+        "near_e": 31,
+        "near_w": 32,
+        "ncr_e": 33,
+        "ncr_w": 34,
+        "ncr_c": 35,
+        "near_cr": 36,
+        "heading_horiz": 37,
+        "front_clear": 38,
+        "trig_sc": 39,
+        "on_countdown": 40,
+        "is_turn": 41,
+        "is_app": 42,
+        "cy_pp": 43,
+        "cy_pn": 44,
+        "cy_np": 45,
+        "cy_nn": 46,
+        "front_block_pos": 47,
+        "front_block_neg": 48,
+        "l_ev": 49,
+        "r_ev": 50,
+        "dleft": 51,
+        "dright": 52,
+        "evidence": 53,
+        "trig_pos": 54,
+        "trig_neg": 55,
+        "fs_pos": 56,
+        "fs_neg": 57,
     }
-    if use_xi_red:
-        idx["xi_red_start"] = i
-        idx["xi_red_stop"] = i + n_rays
-        i = idx["xi_red_stop"]
-
-    def alloc(name):
-        nonlocal i
-        idx[name] = i
-        i += 1
-
-    # Colour evidence & front-sign latches.
-    alloc("l_ev")
-    alloc("r_ev")
-    alloc("dleft")         # rt pulse: left-only AND not latched
-    alloc("dright")        # rt pulse: right-only AND not latched
-    alloc("evidence")      # signed integrator (identity)
-    alloc("trig_pos")      # rt: evidence > +thr
-    alloc("trig_neg")      # rt: evidence < -thr
-    alloc("fs_pos")        # rt self-latch: front sign positive
-    alloc("fs_neg")        # rt self-latch: front sign negative
-    alloc("x5_pos")        # rt: gated front block, positive side
-    alloc("x5_neg")        # rt: gated front block, negative side
-
-    # Trig neurons.
-    alloc("cos_n")         # cos(theta)
-    alloc("sin_n")         # sin(theta)
-
-    # Magnitude/sign helpers.
-    alloc("sin_sq")        # SIN_N squared
-    alloc("cos_pos")       # rt(K*COS_N)
-    alloc("cos_neg")       # rt(-K*COS_N)
-    alloc("y_pos")         # rt(K*X11)
-    alloc("y_neg")         # rt(-K*X11)
-
-    # Shortcut predicates.
-    alloc("near_center")   # |X10| < NEAR_CENTER_THR
-    alloc("heading_horiz") # sin^2 < SIN_HORIZ_THR^2
-    alloc("front_clear")   # X5p + X5n small
-    alloc("trig_sc")       # AND of 4 conditions (refractory via -K*X22)
-
-    # Shortcut phase indicators.
-    alloc("on_22")         # X22 > 0.5
-    alloc("is_turn")       # X22 > APPROACH_STEPS + 0.5
-    alloc("is_app")        # on_22 AND NOT is_turn
-
-    # Seeded latch helpers (for capturing initial correction).
-    alloc("seed_pos")      # rt: captures +part of (-corr) at step 0
-    alloc("seed_neg")      # rt: captures -part
-
-    # Turn-direction quadrant ANDs.
-    alloc("cy_pp")         # rt: COS_POS AND Y_POS AND IS_TURN
-    alloc("cy_pn")         # rt: COS_POS AND Y_NEG AND IS_TURN
-    alloc("cy_np")         # rt: COS_NEG AND Y_POS AND IS_TURN
-    alloc("cy_nn")         # rt: COS_NEG AND Y_NEG AND IS_TURN
-
-    # near_corr predicate helpers.
-    alloc("cos_big_pos")   # rt: cos > +0.5
-    alloc("cos_big_neg")   # rt: cos < -0.5
-    alloc("near_e")        # bump: |x10 + DRIFT_OFFSET| < THR
-    alloc("near_w")        # bump: |x10 - DRIFT_OFFSET| < THR
-    alloc("ncr_e")         # rt: cos_big_pos AND |x10+DRIFT|<THR
-    alloc("ncr_w")         # rt: cos_big_neg AND |x10-DRIFT|<THR
-    alloc("cos_small")     # rt: |cos| <= 0.5
-    alloc("ncr_c")         # rt: cos_small AND near_center (fallback)
-    alloc("near_corr")     # rt: OR of ncr_e, ncr_w, ncr_c
-
-    alloc("bio_end")
+    idx["xi_blue_start"] = 58
+    idx["xi_blue_stop"] = idx["xi_blue_start"] + n_rays
+    idx["half"] = n_rays // 2
+    idx["bio_end"] = idx["xi_blue_stop"]
     return idx
 
 
@@ -179,14 +135,22 @@ def make_activation(a, idx):
     Each out[i] depends only on x[i].  The activation type for neuron i
     is looked up from index arrays built once here.
     """
-    id_list = [7, 10, 11, 13, 14, idx["shortcut_steer"], idx["init_impulse"], idx["evidence"]]
+    id_list = [
+        idx["dir_accum"],
+        idx["pos_x"],
+        idx["pos_y"],
+        idx["head_corr"],
+        idx["shortcut_steer"],
+        idx["init_impulse"],
+        idx["evidence"],
+        idx["l_ev"],
+        idx["r_ev"],
+    ]
     sin_list = [idx["cos_n"], idx["sin_n"]]
     square_list = [idx["sin_sq"]]
-    relu_list = [22]
-    bump_list = [idx["near_center"], idx["near_e"], idx["near_w"]]
+    relu_list = [idx["energy_ramp"], idx["sc_countdown"]]
+    bump_list = [idx["near_c"], idx["near_e"], idx["near_w"]]
     bump_list.extend(range(idx["xi_blue_start"], idx["xi_blue_stop"]))
-    if "xi_red_start" in idx:
-        bump_list.extend(range(idx["xi_red_start"], idx["xi_red_stop"]))
 
     id_arr   = np.array(sorted(set(id_list)), dtype=int)
     sin_arr  = np.array(sorted(set(sin_list)), dtype=int)
@@ -207,8 +171,8 @@ def make_activation(a, idx):
             out[relu_arr, 0] = np.maximum(0.0, x[relu_arr, 0])
         if bump_arr.size:
             out[bump_arr, 0] = np.maximum(0.0, 1.0 - 4.0 * x[bump_arr, 0] ** 2)
-        # X6 : clip(z, -a, a)
-        out[6, 0] = float(np.clip(x[6, 0], -a, a))
+        # dtheta : clip(z, -a, a)
+        out[idx["dtheta"], 0] = float(np.clip(x[idx["dtheta"], 0], -a, a))
         return out
 
     return f
@@ -236,10 +200,26 @@ def reflex_bio2_player():
 
     speed = bot.speed                   # 0.01
     n_rays = p                          # 64
-    idx = _bio2_indices(n_rays, use_xi_red=USE_XI_RED_FALLBACK)
-    a = STEP_A
+    idx = _bio2_indices(n_rays)
+    a = step_a
 
     # Aliases.
+    HIT_FEAT = idx["hit_feat"]
+    PROX_LEFT = idx["prox_left"]
+    PROX_RIGHT = idx["prox_right"]
+    SAFE_LEFT = idx["safe_left"]
+    SAFE_RIGHT = idx["safe_right"]
+    DTHETA = idx["dtheta"]
+    DIR_ACCUM = idx["dir_accum"]
+    POS_X = idx["pos_x"]
+    POS_Y = idx["pos_y"]
+    HEAD_CORR = idx["head_corr"]
+    SEEDED_FLAG = idx["seeded_flag"]
+    ENERGY_RAMP = idx["energy_ramp"]
+    ARMED_LATCH = idx["armed_latch"]
+    REWARD_PULSE = idx["reward_pulse"]
+    REWARD_LATCH = idx["reward_latch"]
+    SC_COUNTDOWN = idx["sc_countdown"]
     L_EV     = idx["l_ev"]
     R_EV     = idx["r_ev"]
     DLEFT    = idx["dleft"]
@@ -249,8 +229,8 @@ def reflex_bio2_player():
     TN       = idx["trig_neg"]
     FS_P     = idx["fs_pos"]
     FS_N     = idx["fs_neg"]
-    X5P      = idx["x5_pos"]
-    X5N      = idx["x5_neg"]
+    FBP      = idx["front_block_pos"]
+    FBN      = idx["front_block_neg"]
     SHORTCUT_STEER = idx["shortcut_steer"]
     INIT_IMPULSE   = idx["init_impulse"]
     COS_N    = idx["cos_n"]
@@ -260,11 +240,11 @@ def reflex_bio2_player():
     COS_NEG  = idx["cos_neg"]
     Y_POS    = idx["y_pos"]
     Y_NEG    = idx["y_neg"]
-    NC       = idx["near_center"]
+    NEAR_C   = idx["near_c"]
     HH       = idx["heading_horiz"]
     FC       = idx["front_clear"]
     TSC      = idx["trig_sc"]
-    ON22     = idx["on_22"]
+    ONC      = idx["on_countdown"]
     IST      = idx["is_turn"]
     ISA      = idx["is_app"]
     SEEDP    = idx["seed_pos"]
@@ -277,7 +257,7 @@ def reflex_bio2_player():
     NCR_W    = idx["ncr_w"]
     COS_SMALL = idx["cos_small"]
     NCR_C    = idx["ncr_c"]
-    NEAR_CORR = idx["near_corr"]
+    NEAR_CR  = idx["near_cr"]
     CY_PP    = idx["cy_pp"]
     CY_PN    = idx["cy_pn"]
     CY_NP    = idx["cy_np"]
@@ -289,17 +269,16 @@ def reflex_bio2_player():
     left_side_idx  = 11
     right_side_idx = 63 - left_side_idx # 52
 
-    Win[0, hit_idx]        = 1.0        # X0: hit
-    Win[1, L_idx]          = 1.0        # X1: prox[L]
-    Win[2, R_idx]          = 1.0        # X2: prox[R]
-    Win[3, left_side_idx]  = -1.0       # X3: safety L
-    Win[4, right_side_idx] = -1.0       # X4: safety R
+    Win[HIT_FEAT, hit_idx] = 1.0
+    Win[PROX_LEFT, L_idx] = 1.0
+    Win[PROX_RIGHT, R_idx] = 1.0
+    Win[SAFE_LEFT, left_side_idx] = -1.0
+    Win[SAFE_RIGHT, right_side_idx] = -1.0
 
     # Approach-phase cancellation: silence reflex features 0..4 while
-    # IS_APP is active, so O reduces to front_block + X20 (matches bio's
-    # `x20_val = -O_no_front` cancellation during approach phase).
-    for i in range(5):
-        W[i, ISA] = -K_SHARP * 100.0
+    # IS_APP is active, so O reduces to the front block plus shortcut steering.
+    for reflex_idx in (HIT_FEAT, PROX_LEFT, PROX_RIGHT, SAFE_LEFT, SAFE_RIGHT):
+        W[reflex_idx, ISA] = -k_sharp * 100.0
 
     C1_idx, C2_idx = 31, 32
     front_thr      = 1.4
@@ -311,52 +290,40 @@ def reflex_bio2_player():
     safety_gain_left  = np.radians(-20.0)
     safety_gain_right = -safety_gain_left
     safety_target     = 0.75
-    Win[3, bias_idx]  = safety_target
-    Win[4, bias_idx]  = safety_target
+    Win[SAFE_LEFT, bias_idx] = safety_target
+    Win[SAFE_RIGHT, bias_idx] = safety_target
 
-    Wout[0, 0] = hit_turn
-    Wout[0, 1] = heading_gain
-    Wout[0, 2] = -heading_gain
-    Wout[0, 3] = safety_gain_left
-    Wout[0, 4] = safety_gain_right
+    Wout[0, HIT_FEAT] = hit_turn
+    Wout[0, PROX_LEFT] = heading_gain
+    Wout[0, PROX_RIGHT] = -heading_gain
+    Wout[0, SAFE_LEFT] = safety_gain_left
+    Wout[0, SAFE_RIGHT] = safety_gain_right
     Wout[0, SHORTCUT_STEER] = 1.0
     Wout[0, INIT_IMPULSE] = 1.0
-
-    # ── X6: dtheta = clip(O, -a, a) ------------------------------
-    # z[6] = Wout[0, :] @ X_prev = O_{t-1} (1-step lag).
-    # We fill W[6, :] AFTER all Wout entries are finalized (bottom).
-
-    # ── X7: direction accumulator ---------------------------------
-    W[7, 7] = 1.0
-    W[7, 6] = 1.0
-
-    # ── X10, X11: position accumulators ---------------------------
+    # dtheta stores the clipped one-step-lagged steering command.
+    # We fill W[dtheta, :] after Wout is finalized so
+    # z_dtheta(t+1) = Wout @ X(t) = O(t).
+    # Direction accumulator.
+    W[DIR_ACCUM, DIR_ACCUM] = 1.0
+    W[DIR_ACCUM, DTHETA] = 1.0
+    # Position accumulators.
     # No hit-gating: drift during transient hits is negligible.
     # Under trig option 2A both neurons use the sin activation, but the
     # biases preserve the current downstream frame exactly.
-    W[10, 10]   = 1.0
-    W[10, COS_N] = speed
-    W[11, 11]   = 1.0
-    W[11, SIN_N] = speed
-
-    # ── X13 (locked initial heading correction, identity) ------
-    # Bio1 latches X[13] = current_corr_0 from step 0 onward via
-    # hold_val = x13 - x14 = X_prev[13] (the subtraction cancels the
-    # current-step term, so X[13] only carries the initial value).
-    # In bio2 we replicate this with a self-recurring latch seeded by
-    # SEEDP/SEEDN (which fire only at step 0 before X24 latches).
-    # There is a 1-step lag vs bio1 (X[13] = 0 at step 0, current_corr_0
-    # from step 1 onward), but the first-step impact is negligible.
+    W[POS_X, POS_X] = 1.0
+    W[POS_X, COS_N] = speed
+    W[POS_Y, POS_Y] = 1.0
+    W[POS_Y, SIN_N] = speed
+    # Initial heading correction latch.
+    # Bio1 latches the initial correction from step 0 onward. Here
+    # head_corr self-recurs and is seeded by seed_pos/seed_neg before
+    # seeded_flag turns on. That introduces a one-step lag vs bio1:
+    # head_corr(0) = 0 and head_corr(t) = current_corr(0) for t >= 1.
     cal_gain = 1.0 / 0.173
-    W[13, 13]    =  1.0
-    W[13, SEEDP] =  1.0
-    W[13, SEEDN] = -1.0
-
-    # X14 (kept for parity with bio layout; not read anywhere).
-    Win[14, L_idx] = -cal_gain
-    Win[14, R_idx] =  cal_gain
-
-    # ── Reward circuit X15-X18 (unchanged) -----------------------
+    W[HEAD_CORR, HEAD_CORR] = 1.0
+    W[HEAD_CORR, SEEDP] = 1.0
+    W[HEAD_CORR, SEEDN] = -1.0
+    # Reward circuit.
     K               = 0.005
     arm_from_energy = 1000.0
     arm_latch       = 10.0
@@ -365,230 +332,204 @@ def reflex_bio2_player():
     arm_gate        = 1000.0
     latch_gain      = 10.0
 
-    Win[15, energy_idx] = K
-    W[16, 15] = arm_from_energy
-    W[16, 16] = arm_latch
-    Win[17, energy_idx] = pulse_gain * K
-    W[17, 15]           = -pulse_gain
-    W[17, 16]           = arm_gate
-    Win[17, bias_idx]   = -(arm_gate + pulse_thr)
-    W[18, 17] = latch_gain
-    W[18, 18] = latch_gain
-
-    # ── X24: seeded flag (rt that saturates to 1 at step 1) -----
-    Win[24, bias_idx] = 10.0
-
-    # Slot 19 is unused (former step counter, retired with ES removal).
-
-    # ── Shortcut outputs -----------------------------------------
+    Win[ENERGY_RAMP, energy_idx] = K
+    W[ARMED_LATCH, ENERGY_RAMP] = arm_from_energy
+    W[ARMED_LATCH, ARMED_LATCH] = arm_latch
+    Win[REWARD_PULSE, energy_idx] = pulse_gain * K
+    W[REWARD_PULSE, ENERGY_RAMP] = -pulse_gain
+    W[REWARD_PULSE, ARMED_LATCH] = arm_gate
+    Win[REWARD_PULSE, bias_idx] = -(arm_gate + pulse_thr)
+    W[REWARD_LATCH, REWARD_PULSE] = latch_gain
+    W[REWARD_LATCH, REWARD_LATCH] = latch_gain
+    # seeded_flag saturates to 1 at step 1.
+    Win[SEEDED_FLAG, bias_idx] = 10.0
+    # Shortcut outputs.
     # Route shortcut steering and the one-shot init impulse through
     # separate fixed slots so debug/docs can name them directly.
-    W[SHORTCUT_STEER, CY_PN] =  abs(SHORTCUT_TURN)   # cos+, y-  → +2
-    W[SHORTCUT_STEER, CY_NP] =  abs(SHORTCUT_TURN)   # cos-, y+  → +2
-    W[SHORTCUT_STEER, CY_PP] = -abs(SHORTCUT_TURN)   # cos+, y+  → -2
-    W[SHORTCUT_STEER, CY_NN] = -abs(SHORTCUT_TURN)   # cos-, y-  → -2
+    W[SHORTCUT_STEER, CY_PN] =  abs(shortcut_turn)   # cos+, y-  → +2
+    W[SHORTCUT_STEER, CY_NP] =  abs(shortcut_turn)   # cos-, y+  → +2
+    W[SHORTCUT_STEER, CY_PP] = -abs(shortcut_turn)   # cos+, y+  → -2
+    W[SHORTCUT_STEER, CY_NN] = -abs(shortcut_turn)   # cos-, y-  → -2
 
-    # One-shot init correction: SEED_{POS,NEG} fire only before X24
+    # One-shot init correction: SEED_{POS,NEG} fire only before seeded_flag
     # latches, so INIT_IMPULSE contributes -current_corr for one step.
     W[INIT_IMPULSE, SEEDP] = -1.0
     W[INIT_IMPULSE, SEEDN] =  1.0
-
-    # ── X22: shortcut countdown (relu) ---------------------------
-    # z[22] = X_prev[22] - 1 + (SC_TOTAL+1)·TSC_prev
-    W[22, 22] = 1.0
-    Win[22, bias_idx] = -1.0
-    W[22, TSC] = float(SC_TOTAL) + 1.0
+    # sc_countdown(t+1) = sc_countdown(t) - 1 + (sc_total + 1) * trig_sc(t).
+    W[SC_COUNTDOWN, SC_COUNTDOWN] = 1.0
+    Win[SC_COUNTDOWN, bias_idx] = -1.0
+    W[SC_COUNTDOWN, TSC] = float(sc_total) + 1.0
 
     # SEED_POS / SEED_NEG: capture +/- part of current_corr ONLY when
-    # X24_prev is 0 (unseeded).  After X24 latches to 1 at step 1+,
+    # seeded_flag(t) is 0 (unseeded). After seeded_flag latches to 1 at step 1+,
     # a huge negative gate suppresses them.
     # SEED_POS fires when current_corr > 0 AND not yet seeded.
     Win[SEEDP, L_idx] = -cal_gain
     Win[SEEDP, R_idx] =  cal_gain
-    W[SEEDP, 24] = -1.0e3        # when X24=1, z ≈ -1000 → rt = 0
+    W[SEEDP, SEEDED_FLAG] = -1.0e3        # when seeded_flag=1, z ≈ -1000 → rt = 0
 
     Win[SEEDN, L_idx] =  cal_gain
     Win[SEEDN, R_idx] = -cal_gain
-    W[SEEDN, 24] = -1.0e3
-
-    # ── Colour evidence rays (bump-based Xi_blue, optional Xi_red) --
+    W[SEEDN, SEEDED_FLAG] = -1.0e3
+    # xi_blue color evidence rays.
     for r in range(n_rays):
         color_input_col = p + r
         Win[idx["xi_blue_start"] + r, color_input_col] = 1.0
         Win[idx["xi_blue_start"] + r, bias_idx] = -4.0
-        if "xi_red_start" in idx:
-            Win[idx["xi_red_start"] + r, color_input_col] = 1.0
-            Win[idx["xi_red_start"] + r, bias_idx] = -5.0
 
     half = idx["half"]
     for r in range(half):
         W[L_EV, idx["xi_blue_start"] + r] = 1.0
-        if "xi_red_start" in idx:
-            W[L_EV, idx["xi_red_start"] + r] = -3.0
     for r in range(half, n_rays):
         W[R_EV, idx["xi_blue_start"] + r] = 1.0
-        if "xi_red_start" in idx:
-            W[R_EV, idx["xi_red_start"] + r] = -3.0
-
-    # ── Gated delta pulses (DLEFT / DRIGHT) ---------------------
+    # Gated delta pulses.
     # Fire only when one side dominates AND front sign NOT yet latched.
-    # With K_SHARP=50 gain and rt, saturates to ~1 when L/R difference
+    # With k_sharp=50 gain and rt, saturates to ~1 when L/R difference
     # exceeds a margin.  The latch subtraction zeros them out once
     # FS_POS or FS_NEG is 1.
-    W[DLEFT, L_EV]  =  K_SHARP
-    W[DLEFT, R_EV]  = -K_SHARP
-    W[DLEFT, FS_P]  = -K_SHARP * 10
-    W[DLEFT, FS_N]  = -K_SHARP * 10
-    Win[DLEFT, bias_idx] = -0.2 * K_SHARP
+    W[DLEFT, L_EV]  =  k_sharp
+    W[DLEFT, R_EV]  = -k_sharp
+    W[DLEFT, FS_P]  = -k_sharp * 10
+    W[DLEFT, FS_N]  = -k_sharp * 10
+    Win[DLEFT, bias_idx] = -0.2 * k_sharp
 
-    W[DRIGHT, L_EV] = -K_SHARP
-    W[DRIGHT, R_EV] =  K_SHARP
-    W[DRIGHT, FS_P] = -K_SHARP * 10
-    W[DRIGHT, FS_N] = -K_SHARP * 10
-    Win[DRIGHT, bias_idx] = -0.2 * K_SHARP
-
-    # ── EVIDENCE (signed integrator, identity) ------------------
+    W[DRIGHT, L_EV] = -k_sharp
+    W[DRIGHT, R_EV] =  k_sharp
+    W[DRIGHT, FS_P] = -k_sharp * 10
+    W[DRIGHT, FS_N] = -k_sharp * 10
+    Win[DRIGHT, bias_idx] = -0.2 * k_sharp
+    # evidence: signed integrator.
     W[EV, EV]     = 1.0
     W[EV, DRIGHT] = 1.0
     W[EV, DLEFT]  = -1.0
-
-    # ── Trigger thresholds (rt, sharp) --------------------------
+    # Trigger thresholds.
     # bio1 uses `if evidence_now >= threshold`; rt(K*(EV-thr)) for EV==thr
     # gives rt(0)=0, so we lower the threshold by 0.5 so TP fires at
     # EV==threshold (DLEFT/DRIGHT saturate to ~±1, so EV is integer-ish).
-    W[TP, EV] =  K_SHARP
-    Win[TP, bias_idx] = -K_SHARP * (COLOR_EVIDENCE_THRESHOLD - 0.5)
-    W[TN, EV] = -K_SHARP
-    Win[TN, bias_idx] = -K_SHARP * (COLOR_EVIDENCE_THRESHOLD - 0.5)
+    W[TP, EV] =  k_sharp
+    Win[TP, bias_idx] = -k_sharp * (color_evidence_thr - 0.5)
+    W[TN, EV] = -k_sharp
+    Win[TN, bias_idx] = -k_sharp * (color_evidence_thr - 0.5)
+    # Front-sign latches.
+    W[FS_P, FS_P] = k_sharp
+    W[FS_P, TP]   = k_sharp
+    W[FS_N, FS_N] = k_sharp
+    W[FS_N, TN]   = k_sharp
+    # front_block_pos / front_block_neg.
+    Win[FBP, C1_idx] = 1.0
+    Win[FBP, C2_idx] = 1.0
+    Win[FBP, bias_idx] = -(front_thr + gate_c)
+    W[FBP, FS_P] = gate_c
+    W[FBP, FS_N] = -gate_c
 
-    # ── FS latches (rt self-latching) ---------------------------
-    W[FS_P, FS_P] = K_SHARP
-    W[FS_P, TP]   = K_SHARP
-    W[FS_N, FS_N] = K_SHARP
-    W[FS_N, TN]   = K_SHARP
+    Win[FBN, C1_idx] = 1.0
+    Win[FBN, C2_idx] = 1.0
+    Win[FBN, bias_idx] = -(front_thr + gate_c)
+    W[FBN, FS_P] = -gate_c
+    W[FBN, FS_N] = gate_c
 
-    # ── X5_POS / X5_NEG (gated front block) ---------------------
-    Win[X5P, C1_idx]   = 1.0
-    Win[X5P, C2_idx]   = 1.0
-    Win[X5P, bias_idx] = -(front_thr + GATE_C)
-    W[X5P, FS_P]     =  GATE_C
-    W[X5P, FS_N]     = -GATE_C
-
-    Win[X5N, C1_idx]   = 1.0
-    Win[X5N, C2_idx]   = 1.0
-    Win[X5N, bias_idx] = -(front_thr + GATE_C)
-    W[X5N, FS_P]     = -GATE_C
-    W[X5N, FS_N]     =  GATE_C
-
-    Wout[0, X5P] =  FRONT_GAIN_MAG
-    Wout[0, X5N] = -FRONT_GAIN_MAG
-
-    # ── Trig neurons (2A: sin-only activation, preserved outputs) --
+    Wout[0, FBP] = front_gain_mag
+    Wout[0, FBN] = -front_gain_mag
+    # Trig neurons (sin-only activation, preserved output frame).
     for idx_trig in (COS_N, SIN_N):
-        W[idx_trig, 7] = 1.0
-        W[idx_trig, 13] = 1.0
-        W[idx_trig, 6] = 1.0
+        W[idx_trig, DIR_ACCUM] = 1.0
+        W[idx_trig, HEAD_CORR] = 1.0
+        W[idx_trig, DTHETA] = 1.0
     Win[COS_N, bias_idx] = np.pi
     Win[SIN_N, bias_idx] = np.pi / 2
-
-    # ── Magnitude/sign helpers ----------------------------------
+    # Magnitude/sign helpers.
     W[SIN_SQ, SIN_N] = 1.0
 
     # COS_POS/COS_NEG only feed quadrant sign logic, so saturation is fine.
-    W[COS_POS, COS_N] =  K_SHARP
-    W[COS_NEG, COS_N] = -K_SHARP
+    W[COS_POS, COS_N] =  k_sharp
+    W[COS_NEG, COS_N] = -k_sharp
 
     # Y_POS/Y_NEG feed quadrant sign logic as sign(y) - saturation OK.
-    W[Y_POS,   11]    =  K_SHARP
-    W[Y_NEG,   11]    = -K_SHARP
+    W[Y_POS, POS_Y] = k_sharp
+    W[Y_NEG, POS_Y] = -k_sharp
 
     # Bump support is |z| < 0.5, so use z = value / (2*thr).
-    bump_scale = 1.0 / (2.0 * NEAR_CENTER_THR)
-    W[NC, 10] = bump_scale
+    bump_scale = 1.0 / (2.0 * near_c_thr)
+    W[NEAR_C, POS_X] = bump_scale
 
     # HH reads the exact squared sine magnitude.
-    W[HH, SIN_SQ] = -K_SHARP / (SIN_HORIZ_THR ** 2)
-    Win[HH, bias_idx] = K_SHARP
+    W[HH, SIN_SQ] = -k_sharp / (sin_horiz_thr ** 2)
+    Win[HH, bias_idx] = k_sharp
 
-    # FRONT_CLEAR: X5p + X5n < 0.1.
-    W[FC, X5P] = -K_SHARP
-    W[FC, X5N] = -K_SHARP
-    Win[FC, bias_idx] =  K_SHARP * 0.1
-
-    # ── near_corr helpers ───────────────────────────────────────
+    # FRONT_CLEAR: front_block_pos + front_block_neg < 0.1.
+    W[FC, FBP] = -k_sharp
+    W[FC, FBN] = -k_sharp
+    Win[FC, bias_idx] =  k_sharp * 0.1
+    # near_cr helpers.
     # COS_BIG_POS: cos > 0.5 (sharp).
-    W[COSBP, COS_N] =  K_SHARP
-    Win[COSBP, bias_idx] = -0.5 * K_SHARP
+    W[COSBP, COS_N] =  k_sharp
+    Win[COSBP, bias_idx] = -0.5 * k_sharp
     # COS_BIG_NEG: cos < -0.5.
-    W[COSBN, COS_N] = -K_SHARP
-    Win[COSBN, bias_idx] = -0.5 * K_SHARP
+    W[COSBN, COS_N] = -k_sharp
+    Win[COSBN, bias_idx] = -0.5 * k_sharp
 
     # Offset corridor detectors.
-    W[NEAR_E, 10] = bump_scale
-    Win[NEAR_E, bias_idx] = DRIFT_OFFSET * bump_scale
-    W[NEAR_W, 10] = bump_scale
-    Win[NEAR_W, bias_idx] = -DRIFT_OFFSET * bump_scale
+    W[NEAR_E, POS_X] = bump_scale
+    Win[NEAR_E, bias_idx] = drift_offset * bump_scale
+    W[NEAR_W, POS_X] = bump_scale
+    Win[NEAR_W, bias_idx] = -drift_offset * bump_scale
 
     # NCR_E / NCR_W: sharp ANDs against the bump detectors.
-    W[NCR_E, COSBP] =  K_SHARP
-    W[NCR_E, NEAR_E] = K_SHARP
-    Win[NCR_E, bias_idx] = -1.2 * K_SHARP
+    W[NCR_E, COSBP] =  k_sharp
+    W[NCR_E, NEAR_E] = k_sharp
+    Win[NCR_E, bias_idx] = -1.2 * k_sharp
 
-    W[NCR_W, COSBN] =  K_SHARP
-    W[NCR_W, NEAR_W] = K_SHARP
-    Win[NCR_W, bias_idx] = -1.2 * K_SHARP
+    W[NCR_W, COSBN] =  k_sharp
+    W[NCR_W, NEAR_W] = k_sharp
+    Win[NCR_W, bias_idx] = -1.2 * k_sharp
 
     # COS_SMALL: |cos| <= 0.5  ≡  NOT cos_big_pos AND NOT cos_big_neg.
-    W[COS_SMALL, COSBP] = -K_SHARP
-    W[COS_SMALL, COSBN] = -K_SHARP
-    Win[COS_SMALL, bias_idx] = 0.5 * K_SHARP
+    W[COS_SMALL, COSBP] = -k_sharp
+    W[COS_SMALL, COSBN] = -k_sharp
+    Win[COS_SMALL, bias_idx] = 0.5 * k_sharp
 
-    # NCR_C: COS_SMALL AND NC  (fallback when bot is heading nearly vertical).
-    W[NCR_C, COS_SMALL] = K_SHARP
-    W[NCR_C, NC]        = K_SHARP
-    Win[NCR_C, bias_idx] = -1.2 * K_SHARP
+    # NCR_C: COS_SMALL AND NEAR_C (fallback when bot is heading nearly vertical).
+    W[NCR_C, COS_SMALL] = k_sharp
+    W[NCR_C, NEAR_C] = k_sharp
+    Win[NCR_C, bias_idx] = -1.2 * k_sharp
 
-    # NEAR_CORR: OR of NCR_E, NCR_W, NCR_C.
-    W[NEAR_CORR, NCR_E] = K_SHARP
-    W[NEAR_CORR, NCR_W] = K_SHARP
-    W[NEAR_CORR, NCR_C] = K_SHARP
-    Win[NEAR_CORR, bias_idx] = -0.5 * K_SHARP
+    # NEAR_CR: OR of NCR_E, NCR_W, NCR_C.
+    W[NEAR_CR, NCR_E] = k_sharp
+    W[NEAR_CR, NCR_W] = k_sharp
+    W[NEAR_CR, NCR_C] = k_sharp
+    Win[NEAR_CR, bias_idx] = -0.5 * k_sharp
 
-    # TRIG_SC: AND of (X18>0.5, HH, FC, NEAR_CORR).
-    # Use near_corr (offset-shifted) instead of NC so the shortcut
+    # TRIG_SC: AND of (reward_latch>0.5, HH, FC, NEAR_CR).
+    # Use near_cr (offset-shifted) instead of NEAR_C so the shortcut
     # actually fires when the bot is on-corridor under a slanted heading.
-    # Historical AND terms SCI (X22<0.5) and ES (X19>60) were removed:
-    # SCI was redundant with the `-K·X22_prev` refractory below, and ES
+    # Historical AND terms SCI (sc_countdown < 0.5) and ES (old step counter) were removed:
+    # SCI was redundant with the -k_sharp * sc_countdown(t) refractory below, and ES
     # had no empirical effect on the accepted score. Bias re-centered
-    # to -3.5·K for the AND-of-4.
-    W[TSC, 18] =  K_SHARP
-    W[TSC, HH] =  K_SHARP
-    W[TSC, FC] =  K_SHARP
-    W[TSC, NEAR_CORR] =  K_SHARP
-    Win[TSC, bias_idx] = -K_SHARP * 3.5
-    # Refractory: once TSC fires, keep it suppressed through two paths:
-    #   • W[TSC, TSC]: blocks t+1 (reads TSC_prev directly)
-    #   • W[TSC, 22]:  blocks t+2..t+SC_TOTAL (reads X22 countdown;
-    #     at X22_prev>=1 this contributes <=-K, which together with the
-    #     -4.5·K bias sinks the AND below zero even if all 5 positive
-    #     inputs are saturated to 1)
-    W[TSC, TSC] = -K_SHARP * 10
-    W[TSC, 22]  = -K_SHARP
+    # to -3.5 * k_sharp for the AND-of-4.
+    W[TSC, REWARD_LATCH] = k_sharp
+    W[TSC, HH] =  k_sharp
+    W[TSC, FC] =  k_sharp
+    W[TSC, NEAR_CR] = k_sharp
+    Win[TSC, bias_idx] = -k_sharp * 3.5
+    # Refractory: once trig_sc fires, keep it suppressed through two paths:
+    # W[TSC, TSC] blocks t+1 directly, and W[TSC, SC_COUNTDOWN] blocks
+    # the remaining countdown window.
+    W[TSC, TSC] = -k_sharp * 10
+    W[TSC, SC_COUNTDOWN] = -k_sharp
 
-    # ON_22: X22 > 0.5.
-    W[ON22, 22] = K_SHARP
-    Win[ON22, bias_idx] = -0.5 * K_SHARP
+    # on_countdown: sc_countdown > 0.5.
+    W[ONC, SC_COUNTDOWN] = k_sharp
+    Win[ONC, bias_idx] = -0.5 * k_sharp
 
-    # IS_TURN: X22 > APPROACH_STEPS + 0.5.
-    W[IST, 22] = K_SHARP
-    Win[IST, bias_idx] = -K_SHARP * (float(APPROACH_STEPS) + 0.5)
+    # is_turn: sc_countdown > approach_steps + 0.5.
+    W[IST, SC_COUNTDOWN] = k_sharp
+    Win[IST, bias_idx] = -k_sharp * (float(approach_steps) + 0.5)
 
-    # IS_APP: on_22 AND NOT is_turn.
-    W[ISA, ON22] =  K_SHARP
-    W[ISA, IST]  = -K_SHARP
-    Win[ISA, bias_idx] = -0.5 * K_SHARP
-
-    # ── Turn direction quadrants ----------------------------------
+    # IS_APP: on_countdown AND NOT is_turn.
+    W[ISA, ONC] = k_sharp
+    W[ISA, IST]  = -k_sharp
+    Win[ISA, bias_idx] = -0.5 * k_sharp
+    # Turn direction quadrants.
     # turn_toward = -sign(cos) * sign(y).
     # Quadrant ANDs (each is a 3-way AND of COS sign, Y sign, IS_TURN):
     #   cy_pp: cos+, y+  →  -1
@@ -596,33 +537,31 @@ def reflex_bio2_player():
     #   cy_np: cos-, y+  →  +1
     #   cy_nn: cos-, y-  →  -1
     # Each CY_* is z = K*(a + b + c - 2.5), rt ~1 iff all three are 1.
-    W[CY_PP, COS_POS] = K_SHARP
-    W[CY_PP, Y_POS]   = K_SHARP
-    W[CY_PP, IST]     = K_SHARP
-    Win[CY_PP, bias_idx] = -2.5 * K_SHARP
+    W[CY_PP, COS_POS] = k_sharp
+    W[CY_PP, Y_POS]   = k_sharp
+    W[CY_PP, IST]     = k_sharp
+    Win[CY_PP, bias_idx] = -2.5 * k_sharp
 
-    W[CY_PN, COS_POS] = K_SHARP
-    W[CY_PN, Y_NEG]   = K_SHARP
-    W[CY_PN, IST]     = K_SHARP
-    Win[CY_PN, bias_idx] = -2.5 * K_SHARP
+    W[CY_PN, COS_POS] = k_sharp
+    W[CY_PN, Y_NEG]   = k_sharp
+    W[CY_PN, IST]     = k_sharp
+    Win[CY_PN, bias_idx] = -2.5 * k_sharp
 
-    W[CY_NP, COS_NEG] = K_SHARP
-    W[CY_NP, Y_POS]   = K_SHARP
-    W[CY_NP, IST]     = K_SHARP
-    Win[CY_NP, bias_idx] = -2.5 * K_SHARP
+    W[CY_NP, COS_NEG] = k_sharp
+    W[CY_NP, Y_POS]   = k_sharp
+    W[CY_NP, IST]     = k_sharp
+    Win[CY_NP, bias_idx] = -2.5 * k_sharp
 
-    W[CY_NN, COS_NEG] = K_SHARP
-    W[CY_NN, Y_NEG]   = K_SHARP
-    W[CY_NN, IST]     = K_SHARP
-    Win[CY_NN, bias_idx] = -2.5 * K_SHARP
-
-    # ── X6 = clip(Wout @ X_prev) --------------------------------
-    # Copy Wout row 0 into W row 6 as the last step so z[6] = O_{t-1}.
+    W[CY_NN, COS_NEG] = k_sharp
+    W[CY_NN, Y_NEG]   = k_sharp
+    W[CY_NN, IST]     = k_sharp
+    Win[CY_NN, bias_idx] = -2.5 * k_sharp
+    # Copy Wout row 0 into W[dtheta, :] as the last step so
+    # z_dtheta(t+1) = O(t).
     for j in range(n):
         if Wout[0, j] != 0.0:
-            W[6, j] = Wout[0, j]
-
-    # ── Build activation ---------------------------------------
+            W[DTHETA, j] = Wout[0, j]
+    # Build pointwise activation.
     f = make_activation(a, idx)
 
     model = Win, W, Wout, warmup, leak, f, g
