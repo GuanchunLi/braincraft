@@ -1,0 +1,1 @@
+1. naming of variables of direction circuit: current cos_n and sin_n is confusing; can we correct that? current `cos_n` should be `sin_n` (also flipping the sign if possible); and current `sin_n` should be `cos+_n`. Change all related formulas.

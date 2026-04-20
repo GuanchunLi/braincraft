@@ -234,10 +234,9 @@ This reproduces the original latched correction with a one-step delay:
 With
 
 ```text
-K = 0.005
-arm_from_energy = 1000
+arm_from_energy = 5
 arm_latch       = 10
-pulse_gain      = 100000
+pulse_gain      = 500
 pulse_thr       = 0.2
 arm_gate        = 1000
 latch_gain      = 10
@@ -246,7 +245,7 @@ latch_gain      = 10
 the reward neurons satisfy
 
 ```text
-energy_ramp(t+1) = relu(K * energy(t))
+energy_ramp(t+1) = relu(energy(t))
 
 armed_latch(t+1) = relu_tanh(
     arm_from_energy * energy_ramp(t)
@@ -254,9 +253,9 @@ armed_latch(t+1) = relu_tanh(
 )
 
 reward_pulse(t+1) = relu_tanh(
-    pulse_gain * K * energy(t)
-  - pulse_gain     * energy_ramp(t)
-  + arm_gate       * armed_latch(t)
+    pulse_gain * energy(t)
+  - pulse_gain * energy_ramp(t)
+  + arm_gate   * armed_latch(t)
   - (arm_gate + pulse_thr)
 )
 
@@ -265,6 +264,12 @@ reward_latch(t+1) = relu_tanh(
   + latch_gain * reward_latch(t)
 )
 ```
+
+Because `energy_ramp` uses a pure `relu`, its preactivation does not need
+to sit in the linear region of `tanh`. The historical pre-scaling
+`K = 0.005` has been absorbed into `arm_from_energy` and `pulse_gain`, so
+the effective coefficients (`5 * energy` on `armed_latch`,
+`500 * Delta energy` on `reward_pulse`) match the previous circuit exactly.
 
 ### 4.5 Blue evidence and front-block sign
 
@@ -402,3 +407,7 @@ Streamline re-verification on 2026-04-20:
 - `python braincraft\env2_player_reflex_bio2.py` -> `14.71 +/- 0.00`
 - `python braincraft\_debug_bio2.py --steps 120 --stride 20` completed
 - `python braincraft\_debug_bio2_detail.py --steps 120` completed
+
+Reward-circuit `K` absorption re-verification on 2026-04-20:
+
+- `python braincraft\env2_player_reflex_bio2.py` -> `14.71 +/- 0.00`

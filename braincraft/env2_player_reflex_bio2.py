@@ -324,18 +324,17 @@ def reflex_bio2_player():
     W[HEAD_CORR, SEEDP] = 1.0
     W[HEAD_CORR, SEEDN] = -1.0
     # Reward circuit.
-    K               = 0.005
-    arm_from_energy = 1000.0
+    arm_from_energy = 5.0
     arm_latch       = 10.0
-    pulse_gain      = 100000.0
+    pulse_gain      = 500.0
     pulse_thr       = 0.2
     arm_gate        = 1000.0
     latch_gain      = 10.0
 
-    Win[ENERGY_RAMP, energy_idx] = K
+    Win[ENERGY_RAMP, energy_idx] = 1.0
     W[ARMED_LATCH, ENERGY_RAMP] = arm_from_energy
     W[ARMED_LATCH, ARMED_LATCH] = arm_latch
-    Win[REWARD_PULSE, energy_idx] = pulse_gain * K
+    Win[REWARD_PULSE, energy_idx] = pulse_gain
     W[REWARD_PULSE, ENERGY_RAMP] = -pulse_gain
     W[REWARD_PULSE, ARMED_LATCH] = arm_gate
     Win[REWARD_PULSE, bias_idx] = -(arm_gate + pulse_thr)
