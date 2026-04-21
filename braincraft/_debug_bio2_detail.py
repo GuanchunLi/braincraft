@@ -73,7 +73,6 @@ def trace_player(model_iter, label, n_steps=20, seed=12345, bio2_idx=None):
                 near_w = _get_value(X_new, bio2_idx, "xw_pos")
             ncre = _get_value(X_new, bio2_idx, "ncr_e")
             ncrw = _get_value(X_new, bio2_idx, "ncr_w")
-            nc = _get_value(X_new, bio2_idx, "near_c")
             ncorr = _get_value(X_new, bio2_idx, "near_cr")
             hh = _get_value(X_new, bio2_idx, "heading_horiz")
             fc = _get_value(X_new, bio2_idx, "front_clear")
@@ -84,7 +83,7 @@ def trace_player(model_iter, label, n_steps=20, seed=12345, bio2_idx=None):
             shortcut_sum = shortcut + init
             print(f"{t:3d} pos_x={pos_x:+.3f} cos_n={cosn:+.3f} CBP={cosbp:.1f} CBN={cosbn:.1f} "
                   f"NE={_format_optional(near_e, '.1f')} NW={_format_optional(near_w, '.1f')} "
-                  f"NCE={ncre:.1f} NCW={ncrw:.1f} NEAR_C={_format_optional(nc, '.1f')} NEAR_CR={ncorr:.1f} "
+                  f"NCE={ncre:.1f} NCW={ncrw:.1f} NEAR_CR={ncorr:.1f} "
                   f"HH={hh:.1f} FC={fc:.1f} sc_count={sc_count:5.1f} "
                   f"TSC={tsc:.1f} IST={ist:.1f} "
                   f"shortcut={shortcut:+.3f} init={init:+.3f} sum={shortcut_sum:+.3f} "

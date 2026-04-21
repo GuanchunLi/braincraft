@@ -21,9 +21,9 @@ The dense bio2 layout is grouped as:
   5..8   dtheta, dir_accum, pos_x, pos_y
   9..12  initial-heading correction latch
   13, 15..19 reward and shortcut state (slot 14 = step_counter for seeding)
-  20..39 trig, corridor, and shortcut-trigger helpers
-  40..57 shortcut-phase, front-block, and color-evidence helpers
-  58..   xi_blue ray bank
+  20..36 trig, corridor, and shortcut-trigger helpers
+  37..54 shortcut-phase, front-block, and color-evidence helpers
+  55..   xi_blue ray bank
 
 The trig pair preserves the established pos_x / pos_y frame while using
 only the sin activation, and the shortcut state machine is expressed
@@ -61,7 +61,7 @@ step_a  = np.radians(5.0)
 # seed_window_k steps (approach A in the robustness plan). SEEDED_FLAG
 # gates on once step_counter >= seed_window_k, giving INIT_IMPULSE that
 # many closed-loop correction cycles before steady-state.
-seed_window_k = 3
+seed_window_k = 6
 
 
 # ── Neuron index layout ────────────────────────────────────────────
@@ -97,37 +97,34 @@ def _bio2_indices(n_rays):
         "y_neg": 26,
         "cos_big_pos": 27,
         "cos_big_neg": 28,
-        "cos_small": 29,
-        "near_c": 30,
-        "near_e": 31,
-        "near_w": 32,
-        "ncr_e": 33,
-        "ncr_w": 34,
-        "ncr_c": 35,
-        "near_cr": 36,
-        "heading_horiz": 37,
-        "front_clear": 38,
-        "trig_sc": 39,
-        "on_countdown": 40,
-        "is_turn": 41,
-        "is_app": 42,
-        "cy_pp": 43,
-        "cy_pn": 44,
-        "cy_np": 45,
-        "cy_nn": 46,
-        "front_block_pos": 47,
-        "front_block_neg": 48,
-        "l_ev": 49,
-        "r_ev": 50,
-        "dleft": 51,
-        "dright": 52,
-        "evidence": 53,
-        "trig_pos": 54,
-        "trig_neg": 55,
-        "fs_pos": 56,
-        "fs_neg": 57,
+        "near_e": 29,
+        "near_w": 30,
+        "ncr_e": 31,
+        "ncr_w": 32,
+        "near_cr": 33,
+        "heading_horiz": 34,
+        "front_clear": 35,
+        "trig_sc": 36,
+        "on_countdown": 37,
+        "is_turn": 38,
+        "is_app": 39,
+        "cy_pp": 40,
+        "cy_pn": 41,
+        "cy_np": 42,
+        "cy_nn": 43,
+        "front_block_pos": 44,
+        "front_block_neg": 45,
+        "l_ev": 46,
+        "r_ev": 47,
+        "dleft": 48,
+        "dright": 49,
+        "evidence": 50,
+        "trig_pos": 51,
+        "trig_neg": 52,
+        "fs_pos": 53,
+        "fs_neg": 54,
     }
-    idx["xi_blue_start"] = 58
+    idx["xi_blue_start"] = 55
     idx["xi_blue_stop"] = idx["xi_blue_start"] + n_rays
     idx["half"] = n_rays // 2
     idx["bio_end"] = idx["xi_blue_stop"]
@@ -156,7 +153,7 @@ def make_activation(a, idx):
     sin_list = [idx["sin_n"], idx["cos_n"]]
     square_list = [idx["sin_sq"]]
     relu_list = [idx["energy_ramp"], idx["sc_countdown"]]
-    bump_list = [idx["near_c"], idx["near_e"], idx["near_w"]]
+    bump_list = [idx["near_e"], idx["near_w"]]
     bump_list.extend(range(idx["xi_blue_start"], idx["xi_blue_stop"]))
 
     id_arr   = np.array(sorted(set(id_list)), dtype=int)
@@ -247,7 +244,6 @@ def reflex_bio2_player():
     COS_NEG  = idx["cos_neg"]
     Y_POS    = idx["y_pos"]
     Y_NEG    = idx["y_neg"]
-    NEAR_C   = idx["near_c"]
     HH       = idx["heading_horiz"]
     FC       = idx["front_clear"]
     TSC      = idx["trig_sc"]
@@ -262,8 +258,6 @@ def reflex_bio2_player():
     NEAR_W   = idx["near_w"]
     NCR_E    = idx["ncr_e"]
     NCR_W    = idx["ncr_w"]
-    COS_SMALL = idx["cos_small"]
-    NCR_C    = idx["ncr_c"]
     NEAR_CR  = idx["near_cr"]
     CY_PP    = idx["cy_pp"]
     CY_PN    = idx["cy_pn"]
@@ -285,7 +279,7 @@ def reflex_bio2_player():
     # Approach-phase cancellation: silence reflex features 0..4 while
     # IS_APP is active, so O reduces to the front block plus shortcut steering.
     for reflex_idx in (HIT_FEAT, PROX_LEFT, PROX_RIGHT, SAFE_LEFT, SAFE_RIGHT):
-        W[reflex_idx, ISA] = -k_sharp * 100.0
+        W[reflex_idx, ISA] = -k_sharp
 
     C1_idx, C2_idx = 31, 32
     front_thr      = 1.4
@@ -467,9 +461,9 @@ def reflex_bio2_player():
     W[Y_POS, POS_Y] = k_sharp
     W[Y_NEG, POS_Y] = -k_sharp
 
-    # Bump support is |z| < 0.5, so use z = value / (2*thr).
+    # Bump support is |z| < 0.5, so z = value / (2*thr) keeps the bump width
+    # at ±near_c_thr around the detector centre.
     bump_scale = 1.0 / (2.0 * near_c_thr)
-    W[NEAR_C, POS_X] = bump_scale
 
     # HH reads the exact squared sine magnitude.
     W[HH, SIN_SQ] = -k_sharp / (sin_horiz_thr ** 2)
@@ -504,25 +498,16 @@ def reflex_bio2_player():
     W[NCR_W, NEAR_W] = k_sharp
     Win[NCR_W, bias_idx] = -1.2 * k_sharp
 
-    # COS_SMALL: |cos| <= 0.5  ≡  NOT cos_big_pos AND NOT cos_big_neg.
-    W[COS_SMALL, COSBP] = -k_sharp
-    W[COS_SMALL, COSBN] = -k_sharp
-    Win[COS_SMALL, bias_idx] = 0.5 * k_sharp
-
-    # NCR_C: COS_SMALL AND NEAR_C (fallback when bot is heading nearly vertical).
-    W[NCR_C, COS_SMALL] = k_sharp
-    W[NCR_C, NEAR_C] = k_sharp
-    Win[NCR_C, bias_idx] = -1.2 * k_sharp
-
-    # NEAR_CR: OR of NCR_E, NCR_W, NCR_C.
+    # NEAR_CR: OR of NCR_E, NCR_W. A previous NCR_C "nearly-vertical" fallback
+    # was provably unreachable under the HH (|sin(phi)| > 0.937) gate and was
+    # removed with its near_c / cos_small helpers.
     W[NEAR_CR, NCR_E] = k_sharp
     W[NEAR_CR, NCR_W] = k_sharp
-    W[NEAR_CR, NCR_C] = k_sharp
     Win[NEAR_CR, bias_idx] = -0.5 * k_sharp
 
     # TRIG_SC: AND of (reward_latch>0.5, HH, FC, NEAR_CR).
-    # Use near_cr (offset-shifted) instead of NEAR_C so the shortcut
-    # actually fires when the bot is on-corridor under a slanted heading.
+    # NEAR_CR is offset-shifted so the shortcut fires when the bot is on-corridor
+    # under a slanted heading (the only regime compatible with HH).
     # Historical AND terms SCI (sc_countdown < 0.5) and ES (old step counter) were removed:
     # SCI was redundant with the -k_sharp * sc_countdown(t) refractory below, and ES
     # had no empirical effect on the accepted score. Bias re-centered
