@@ -19,8 +19,8 @@ The dense bio2 layout is grouped as:
 
   0..4   reflex features
   5..8   dtheta, dir_accum, pos_x, pos_y
-  9..12  initial-heading correction latch
-  13, 15..19 reward and shortcut state (slot 14 = step_counter for seeding)
+  9..13  initial-heading correction latch (slot 11 = step_counter for seeding)
+  14..19 reward and shortcut state
   20..32 trig, corridor, and shortcut-trigger helpers
   33..50 shortcut-phase, front-block, and color-evidence helpers
   51..   xi_blue ray bank
@@ -79,10 +79,10 @@ def _bio2_indices(n_rays):
         "pos_y": 8,
         "head_corr": 9,
         "seeded_flag": 10,
-        "seed_pos": 11,
-        "seed_neg": 12,
-        "energy_ramp": 13,
-        "step_counter": 14,
+        "step_counter": 11,
+        "seed_pos": 12,
+        "seed_neg": 13,
+        "energy_ramp": 14,
         "reward_pulse": 15,
         "reward_latch": 16,
         "sc_countdown": 17,

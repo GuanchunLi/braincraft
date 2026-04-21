@@ -97,10 +97,10 @@ Live bio2 slots in allocator order:
 | `8` | `pos_y` | `identity` | integrated y-like corridor coordinate |
 | `9` | `head_corr` | `identity` | latched initial heading correction |
 | `10` | `seeded_flag` | `relu_tanh` | one-way seed latch |
-| `11` | `seed_pos` | `relu_tanh` | positive initial-correction pulse |
-| `12` | `seed_neg` | `relu_tanh` | negative initial-correction pulse |
-| `13` | `energy_ramp` | `relu` | energy ramp for reward trigger |
-| `14` | `step_counter` | `identity` | step index (0, 1, 2, ...), drives `seeded_flag` timing |
+| `11` | `step_counter` | `identity` | step index (0, 1, 2, ...), drives `seeded_flag` timing |
+| `12` | `seed_pos` | `relu_tanh` | positive initial-correction pulse |
+| `13` | `seed_neg` | `relu_tanh` | negative initial-correction pulse |
+| `14` | `energy_ramp` | `relu` | energy ramp for reward trigger |
 | `15` | `reward_pulse` | `relu_tanh` | reward pulse detector |
 | `16` | `reward_latch` | `relu_tanh` | latched reward signal |
 | `17` | `sc_countdown` | `relu` | shortcut countdown |
@@ -282,7 +282,69 @@ removes the dedicated `armed_latch` neuron: its sole purpose was to
 wait for the first non-zero `energy_ramp` before arming, and
 `seeded_flag` provides the same guarantee without extra state.
 
-### 4.5 Blue evidence and front-block sign
+### 4.5 Corridor tests and shortcut trigger
+
+Two bump-based offset corridor detectors are driven by `pos_x`. `near_e`
+fires when `pos_x` is near `-drift_offset` (bot west of centre, about to
+cross if heading east); `near_w` is the mirror:
+
+```text
+near_e(t+1) = bump((pos_x(t) + drift_offset) / (2*near_c_thr))
+near_w(t+1) = bump((pos_x(t) - drift_offset) / (2*near_c_thr))
+```
+
+The corridor predicate `near_cr` is simply their OR. An earlier layout
+included a central detector `near_c` plus directional gates
+(`cos_big_pos`/`cos_big_neg`/`cos_small` feeding `ncr_e`/`ncr_w`/`ncr_c`),
+but those seven helpers were provably redundant under the
+`heading_horiz` (`|sin(phi)| > 0.937`) conjunction in `trig_sc` — ablation
+left the accepted score unchanged, so they were removed:
+
+```text
+near_cr(t+1) = relu_tanh(k_sharp*(near_e(t) + near_w(t) - 0.5))
+
+heading_horiz(t+1) = relu_tanh(k_sharp*(1 - sin_sq(t) / sin_horiz_thr^2))
+front_clear(t+1)   = relu_tanh(k_sharp*(0.1 - front_block_pos(t) - front_block_neg(t)))
+```
+
+The shortcut trigger is a 4-way AND with refractory feedback:
+
+```text
+trig_sc(t+1) = relu_tanh(
+    k_sharp*(reward_latch(t) + heading_horiz(t) + front_clear(t) + near_cr(t) - 3.5)
+  - 10*k_sharp*trig_sc(t)
+  - k_sharp*sc_countdown(t)
+)
+```
+
+### 4.6 Shortcut phases and steering
+
+The countdown and phase gates are
+
+```text
+sc_countdown(t+1) = relu(sc_countdown(t) - 1 + (sc_total + 1) * trig_sc(t))
+
+on_countdown(t+1) = relu_tanh(k_sharp*(sc_countdown(t) - 0.5))
+is_turn(t+1)      = relu_tanh(k_sharp*(sc_countdown(t) - (approach_steps + 0.5)))
+is_app(t+1)       = relu_tanh(k_sharp*(on_countdown(t) - is_turn(t) - 0.5))
+```
+
+During the turn phase, four quadrant detectors implement
+`turn_toward = sign(sin(phi)) * sign(pos_y)`. The `cos_pos / cos_neg`
+helpers keep their legacy names but now test `sign(-sin(phi))`, so the
+same wiring yields the same turn direction as before the rename:
+
+```text
+cy_pp(t+1) = relu_tanh(k_sharp*(cos_pos(t) + y_pos(t) + is_turn(t) - 2.5))
+cy_pn(t+1) = relu_tanh(k_sharp*(cos_pos(t) + y_neg(t) + is_turn(t) - 2.5))
+cy_np(t+1) = relu_tanh(k_sharp*(cos_neg(t) + y_pos(t) + is_turn(t) - 2.5))
+cy_nn(t+1) = relu_tanh(k_sharp*(cos_neg(t) + y_neg(t) + is_turn(t) - 2.5))
+
+shortcut_steer(t+1) =
+    abs(shortcut_turn) * (cy_pn(t) + cy_np(t) - cy_pp(t) - cy_nn(t))
+```
+
+### 4.7 Blue evidence and front-block sign
 
 Each blue detector is a bump centered at color value `4`:
 
@@ -319,68 +381,6 @@ front_block_neg(t+1) = relu_tanh(C1(t) + C2(t) - (front_thr + gate_c) - gate_c*f
 ```
 
 with `front_thr = 1.4`.
-
-### 4.6 Corridor tests and shortcut trigger
-
-Two bump-based offset corridor detectors are driven by `pos_x`. `near_e`
-fires when `pos_x` is near `-drift_offset` (bot west of centre, about to
-cross if heading east); `near_w` is the mirror:
-
-```text
-near_e(t+1) = bump((pos_x(t) + drift_offset) / (2*near_c_thr))
-near_w(t+1) = bump((pos_x(t) - drift_offset) / (2*near_c_thr))
-```
-
-The corridor predicate `near_cr` is simply their OR. An earlier layout
-included a central detector `near_c` plus directional gates
-(`cos_big_pos`/`cos_big_neg`/`cos_small` feeding `ncr_e`/`ncr_w`/`ncr_c`),
-but those seven helpers were provably redundant under the
-`heading_horiz` (`|sin(phi)| > 0.937`) conjunction in `trig_sc` — ablation
-left the accepted score unchanged, so they were removed:
-
-```text
-near_cr(t+1) = relu_tanh(k_sharp*(near_e(t) + near_w(t) - 0.5))
-
-heading_horiz(t+1) = relu_tanh(k_sharp*(1 - sin_sq(t) / sin_horiz_thr^2))
-front_clear(t+1)   = relu_tanh(k_sharp*(0.1 - front_block_pos(t) - front_block_neg(t)))
-```
-
-The shortcut trigger is a 4-way AND with refractory feedback:
-
-```text
-trig_sc(t+1) = relu_tanh(
-    k_sharp*(reward_latch(t) + heading_horiz(t) + front_clear(t) + near_cr(t) - 3.5)
-  - 10*k_sharp*trig_sc(t)
-  - k_sharp*sc_countdown(t)
-)
-```
-
-### 4.7 Shortcut phases and steering
-
-The countdown and phase gates are
-
-```text
-sc_countdown(t+1) = relu(sc_countdown(t) - 1 + (sc_total + 1) * trig_sc(t))
-
-on_countdown(t+1) = relu_tanh(k_sharp*(sc_countdown(t) - 0.5))
-is_turn(t+1)      = relu_tanh(k_sharp*(sc_countdown(t) - (approach_steps + 0.5)))
-is_app(t+1)       = relu_tanh(k_sharp*(on_countdown(t) - is_turn(t) - 0.5))
-```
-
-During the turn phase, four quadrant detectors implement
-`turn_toward = sign(sin(phi)) * sign(pos_y)`. The `cos_pos / cos_neg`
-helpers keep their legacy names but now test `sign(-sin(phi))`, so the
-same wiring yields the same turn direction as before the rename:
-
-```text
-cy_pp(t+1) = relu_tanh(k_sharp*(cos_pos(t) + y_pos(t) + is_turn(t) - 2.5))
-cy_pn(t+1) = relu_tanh(k_sharp*(cos_pos(t) + y_neg(t) + is_turn(t) - 2.5))
-cy_np(t+1) = relu_tanh(k_sharp*(cos_neg(t) + y_pos(t) + is_turn(t) - 2.5))
-cy_nn(t+1) = relu_tanh(k_sharp*(cos_neg(t) + y_neg(t) + is_turn(t) - 2.5))
-
-shortcut_steer(t+1) =
-    abs(shortcut_turn) * (cy_pn(t) + cy_np(t) - cy_pp(t) - cy_nn(t))
-```
 
 ## 5. Nonzero Readout Weights
 
