@@ -412,7 +412,13 @@ python braincraft\_debug_bio2.py --steps 120 --stride 20
 python braincraft\_debug_bio2_detail.py --steps 120
 ```
 
-Accepted env2 score on 2026-04-17: `14.71 +/- 0.00`.
+Latest local smoke-test verification on 2026-04-21:
+
+- `python braincraft\env2_player_reflex_bio2.py` -> `14.73 +/- 0.08`
+- `python braincraft\_debug_bio2.py --steps 120 --stride 20` completed
+- `python braincraft\_debug_bio2_detail.py --steps 120` completed
+
+Historical accepted env2 score on 2026-04-17: `14.71 +/- 0.00`.
 
 Streamline re-verification on 2026-04-20:
 

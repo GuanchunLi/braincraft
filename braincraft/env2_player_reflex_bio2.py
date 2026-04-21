@@ -308,17 +308,18 @@ def reflex_bio2_player():
     W[POS_Y, POS_Y] = 1.0
     W[POS_Y, COS_N] = speed
     # Initial heading correction latch.
-    # Bio1 latches the initial correction from step 0 onward. Here
-    # head_corr self-recurs and is seeded by seed_pos/seed_neg before
-    # seeded_flag turns on. That introduces a one-step lag vs bio1:
-    # head_corr(0) = 0 and head_corr(t) = current_corr(0) for t >= 1.
+    # Bio1 latches a single initial correction from step 0 onward. Here
+    # head_corr self-recurs and integrates SEED_{POS,NEG} across the
+    # initial seed window, so head_corr(0) = 0 and then accumulates the
+    # residual left/right depth asymmetry for seed_window_k steps.
     cal_gain = 1.0 / 0.173
     W[HEAD_CORR, HEAD_CORR] = 1.0
     W[HEAD_CORR, SEEDP] = 1.0
     W[HEAD_CORR, SEEDN] = -1.0
-    # Reward circuit. SEEDED_FLAG (0 at step 0, saturated to 1 from step 1
-    # onward) gates REWARD_PULSE so it cannot fire at step 1 before
-    # ENERGY_RAMP has a valid previous-energy reference.
+    # Reward circuit. SEEDED_FLAG stays near 0 through the initial
+    # seed_window_k correction steps and saturates to 1 afterward, so
+    # REWARD_PULSE cannot fire until ENERGY_RAMP has a valid previous-
+    # energy reference and the seed window has finished.
     pulse_gain      = 500.0
     pulse_thr       = 0.2
     arm_gate        = 1000.0
@@ -346,15 +347,15 @@ def reflex_bio2_player():
     W[REWARD_LATCH, REWARD_PULSE] = latch_gain
     W[REWARD_LATCH, REWARD_LATCH] = latch_gain
     # Shortcut outputs.
-    # Route shortcut steering and the one-shot init impulse through
+    # Route shortcut steering and the initial correction pulse through
     # separate fixed slots so debug/docs can name them directly.
     W[SHORTCUT_STEER, CY_PN] =  abs(shortcut_turn)   # cos+, y-  → +2
     W[SHORTCUT_STEER, CY_NP] =  abs(shortcut_turn)   # cos-, y+  → +2
     W[SHORTCUT_STEER, CY_PP] = -abs(shortcut_turn)   # cos+, y+  → -2
     W[SHORTCUT_STEER, CY_NN] = -abs(shortcut_turn)   # cos-, y-  → -2
 
-    # One-shot init correction: SEED_{POS,NEG} fire only before seeded_flag
-    # latches, so INIT_IMPULSE contributes -current_corr for one step.
+    # During the initial seed window, SEED_{POS,NEG} track the residual
+    # signed depth asymmetry and INIT_IMPULSE contributes its negation.
     W[INIT_IMPULSE, SEEDP] = -1.0
     W[INIT_IMPULSE, SEEDN] =  1.0
     # sc_countdown(t+1) = sc_countdown(t) - 1 + (sc_total + 1) * trig_sc(t).
@@ -362,9 +363,9 @@ def reflex_bio2_player():
     Win[SC_COUNTDOWN, bias_idx] = -1.0
     W[SC_COUNTDOWN, TSC] = float(sc_total) + 1.0
 
-    # SEED_POS / SEED_NEG: capture +/- part of current_corr ONLY when
-    # seeded_flag(t) is 0 (unseeded). After seeded_flag latches to 1 at step 1+,
-    # a huge negative gate suppresses them.
+    # SEED_POS / SEED_NEG: capture +/- part of current_corr ONLY while
+    # seeded_flag(t) is 0. Once seeded_flag turns on after the initial
+    # seed window, a huge negative gate suppresses them.
     # SEED_POS fires when current_corr > 0 AND not yet seeded.
     Win[SEEDP, L_idx] = -cal_gain
     Win[SEEDP, R_idx] =  cal_gain
@@ -511,7 +512,8 @@ def reflex_bio2_player():
     W[ISA, IST]  = -k_sharp
     Win[ISA, bias_idx] = -0.5 * k_sharp
     # Turn direction quadrants.
-    # turn_toward = -sign(cos) * sign(y).
+    # turn_toward = sign(sin(phi)) * sign(y).
+    # COS_POS / COS_NEG are legacy names; they test sign(-sin(phi)).
     # Quadrant ANDs (each is a 3-way AND of COS sign, Y sign, IS_TURN):
     #   cy_pp: cos+, y+  →  -1
     #   cy_pn: cos+, y-  →  +1
