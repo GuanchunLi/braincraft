@@ -21,9 +21,9 @@ The dense bio2 layout is grouped as:
   5..8   dtheta, dir_accum, pos_x, pos_y
   9..12  initial-heading correction latch
   13, 15..19 reward and shortcut state (slot 14 = step_counter for seeding)
-  20..36 trig, corridor, and shortcut-trigger helpers
-  37..54 shortcut-phase, front-block, and color-evidence helpers
-  55..   xi_blue ray bank
+  20..32 trig, corridor, and shortcut-trigger helpers
+  33..50 shortcut-phase, front-block, and color-evidence helpers
+  51..   xi_blue ray bank
 
 The trig pair preserves the established pos_x / pos_y frame while using
 only the sin activation, and the shortcut state machine is expressed
@@ -95,36 +95,32 @@ def _bio2_indices(n_rays):
         "cos_neg": 24,
         "y_pos": 25,
         "y_neg": 26,
-        "cos_big_pos": 27,
-        "cos_big_neg": 28,
-        "near_e": 29,
-        "near_w": 30,
-        "ncr_e": 31,
-        "ncr_w": 32,
-        "near_cr": 33,
-        "heading_horiz": 34,
-        "front_clear": 35,
-        "trig_sc": 36,
-        "on_countdown": 37,
-        "is_turn": 38,
-        "is_app": 39,
-        "cy_pp": 40,
-        "cy_pn": 41,
-        "cy_np": 42,
-        "cy_nn": 43,
-        "front_block_pos": 44,
-        "front_block_neg": 45,
-        "l_ev": 46,
-        "r_ev": 47,
-        "dleft": 48,
-        "dright": 49,
-        "evidence": 50,
-        "trig_pos": 51,
-        "trig_neg": 52,
-        "fs_pos": 53,
-        "fs_neg": 54,
+        "near_e": 27,
+        "near_w": 28,
+        "near_cr": 29,
+        "heading_horiz": 30,
+        "front_clear": 31,
+        "trig_sc": 32,
+        "on_countdown": 33,
+        "is_turn": 34,
+        "is_app": 35,
+        "cy_pp": 36,
+        "cy_pn": 37,
+        "cy_np": 38,
+        "cy_nn": 39,
+        "front_block_pos": 40,
+        "front_block_neg": 41,
+        "l_ev": 42,
+        "r_ev": 43,
+        "dleft": 44,
+        "dright": 45,
+        "evidence": 46,
+        "trig_pos": 47,
+        "trig_neg": 48,
+        "fs_pos": 49,
+        "fs_neg": 50,
     }
-    idx["xi_blue_start"] = 55
+    idx["xi_blue_start"] = 51
     idx["xi_blue_stop"] = idx["xi_blue_start"] + n_rays
     idx["half"] = n_rays // 2
     idx["bio_end"] = idx["xi_blue_stop"]
@@ -252,12 +248,8 @@ def reflex_bio2_player():
     ISA      = idx["is_app"]
     SEEDP    = idx["seed_pos"]
     SEEDN    = idx["seed_neg"]
-    COSBP    = idx["cos_big_pos"]
-    COSBN    = idx["cos_big_neg"]
     NEAR_E   = idx["near_e"]
     NEAR_W   = idx["near_w"]
-    NCR_E    = idx["ncr_e"]
-    NCR_W    = idx["ncr_w"]
     NEAR_CR  = idx["near_cr"]
     CY_PP    = idx["cy_pp"]
     CY_PN    = idx["cy_pn"]
@@ -473,36 +465,19 @@ def reflex_bio2_player():
     W[FC, FBP] = -k_sharp
     W[FC, FBN] = -k_sharp
     Win[FC, bias_idx] =  k_sharp * 0.1
-    # near_cr helpers.
-    # COS_BIG_POS / COS_BIG_NEG test sign of -sin(phi) against 0.5, matching the
-    # legacy "old cos_n" convention used by the corridor quadrant logic.
-    # COS_BIG_POS: -sin(phi) > 0.5  (i.e. sin(phi) < -0.5).
-    W[COSBP, SIN_N] = -k_sharp
-    Win[COSBP, bias_idx] = -0.5 * k_sharp
-    # COS_BIG_NEG: -sin(phi) < -0.5  (i.e. sin(phi) > 0.5).
-    W[COSBN, SIN_N] =  k_sharp
-    Win[COSBN, bias_idx] = -0.5 * k_sharp
-
-    # Offset corridor detectors.
+    # Offset corridor detectors. NEAR_E fires when POS_X is near -drift_offset
+    # (bot west of centre, about to cross if heading east); NEAR_W is the mirror.
     W[NEAR_E, POS_X] = bump_scale
     Win[NEAR_E, bias_idx] = drift_offset * bump_scale
     W[NEAR_W, POS_X] = bump_scale
     Win[NEAR_W, bias_idx] = -drift_offset * bump_scale
 
-    # NCR_E / NCR_W: sharp ANDs against the bump detectors.
-    W[NCR_E, COSBP] =  k_sharp
-    W[NCR_E, NEAR_E] = k_sharp
-    Win[NCR_E, bias_idx] = -1.2 * k_sharp
-
-    W[NCR_W, COSBN] =  k_sharp
-    W[NCR_W, NEAR_W] = k_sharp
-    Win[NCR_W, bias_idx] = -1.2 * k_sharp
-
-    # NEAR_CR: OR of NCR_E, NCR_W. A previous NCR_C "nearly-vertical" fallback
-    # was provably unreachable under the HH (|sin(phi)| > 0.937) gate and was
-    # removed with its near_c / cos_small helpers.
-    W[NEAR_CR, NCR_E] = k_sharp
-    W[NEAR_CR, NCR_W] = k_sharp
+    # NEAR_CR: OR of NEAR_E, NEAR_W. A previous sign-of-sin(phi) directional
+    # gate (COSBP/COSBN feeding NCR_E/NCR_W) was provably redundant under the
+    # HH (|sin(phi)| > 0.937) conjunction in TRIG_SC — ablation showed bypassing
+    # it left the score unchanged — so those four helper neurons were removed.
+    W[NEAR_CR, NEAR_E] = k_sharp
+    W[NEAR_CR, NEAR_W] = k_sharp
     Win[NEAR_CR, bias_idx] = -0.5 * k_sharp
 
     # TRIG_SC: AND of (reward_latch>0.5, HH, FC, NEAR_CR).

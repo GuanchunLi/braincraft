@@ -49,7 +49,7 @@ def ablate_edges(model, edges, n_rays=64):
     return (Win, W, Wout, warmup, leak, f, g)
 
 
-def run(label, ablate_names=None, edges=None, seed=12345):
+def run(label, ablate_names=None, edges=None, rewire=None, seed=12345):
     np.random.seed(seed)
     base = train(reflex_bio2_player, timeout=100)
     model = base
@@ -57,6 +57,8 @@ def run(label, ablate_names=None, edges=None, seed=12345):
         model = ablate(model, ablate_names)
     if edges:
         model = ablate_edges(model, edges)
+    if rewire is not None:
+        model = rewire(model)
     t0 = time.time()
     score, std = evaluate(model, Bot, Environment, debug=False, seed=seed)
     dt = time.time() - t0
@@ -81,13 +83,13 @@ if __name__ == "__main__":
 
     if mode in ("corridor", "all"):
         print("\nAblation sweep for corridor / shortcut circuit.\n")
-        # The near_c / ncr_c / cos_small neurons were removed after ablation
-        # showed they were unreachable under the HH gate. What remains is the
-        # slanted-corridor firing path via NCR_E / NCR_W.
+        # After collapsing the directional gate (COSBP/COSBN/NCR_E/NCR_W removed),
+        # NEAR_CR = OR(NEAR_E, NEAR_W). Cutting either offset detector drops the
+        # corresponding shortcut-firing opportunity.
         run("baseline (no ablation)", [])
-        run("drop ncr_e (cut W[near_cr, ncr_e])",
-            edges=[("near_cr", "ncr_e")])
-        run("drop ncr_w (cut W[near_cr, ncr_w])",
-            edges=[("near_cr", "ncr_w")])
-        run("drop both ncr_e and ncr_w (kills shortcut)",
-            edges=[("near_cr", "ncr_e"), ("near_cr", "ncr_w")])
+        run("drop near_e (cut W[near_cr, near_e])",
+            edges=[("near_cr", "near_e")])
+        run("drop near_w (cut W[near_cr, near_w])",
+            edges=[("near_cr", "near_w")])
+        run("drop both near_e and near_w (kills shortcut)",
+            edges=[("near_cr", "near_e"), ("near_cr", "near_w")])

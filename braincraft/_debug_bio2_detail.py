@@ -63,16 +63,12 @@ def trace_player(model_iter, label, n_steps=20, seed=12345, bio2_idx=None):
         sc_count = _get_value_or_index(X_new, bio2_idx, "sc_countdown", fallback_idx=22)
         if bio2_idx is not None:
             cosn = _get_value(X_new, bio2_idx, "cos_n")
-            cosbp = _get_value(X_new, bio2_idx, "cos_big_pos")
-            cosbn = _get_value(X_new, bio2_idx, "cos_big_neg")
             near_e = _get_value(X_new, bio2_idx, "near_e")
             if near_e is None:
                 near_e = _get_value(X_new, bio2_idx, "xe_pos")
             near_w = _get_value(X_new, bio2_idx, "near_w")
             if near_w is None:
                 near_w = _get_value(X_new, bio2_idx, "xw_pos")
-            ncre = _get_value(X_new, bio2_idx, "ncr_e")
-            ncrw = _get_value(X_new, bio2_idx, "ncr_w")
             ncorr = _get_value(X_new, bio2_idx, "near_cr")
             hh = _get_value(X_new, bio2_idx, "heading_horiz")
             fc = _get_value(X_new, bio2_idx, "front_clear")
@@ -81,9 +77,9 @@ def trace_player(model_iter, label, n_steps=20, seed=12345, bio2_idx=None):
             shortcut = _get_value(X_new, bio2_idx, "shortcut_steer", 0.0)
             init = _get_value(X_new, bio2_idx, "init_impulse", 0.0)
             shortcut_sum = shortcut + init
-            print(f"{t:3d} pos_x={pos_x:+.3f} cos_n={cosn:+.3f} CBP={cosbp:.1f} CBN={cosbn:.1f} "
+            print(f"{t:3d} pos_x={pos_x:+.3f} cos_n={cosn:+.3f} "
                   f"NE={_format_optional(near_e, '.1f')} NW={_format_optional(near_w, '.1f')} "
-                  f"NCE={ncre:.1f} NCW={ncrw:.1f} NEAR_CR={ncorr:.1f} "
+                  f"NEAR_CR={ncorr:.1f} "
                   f"HH={hh:.1f} FC={fc:.1f} sc_count={sc_count:5.1f} "
                   f"TSC={tsc:.1f} IST={ist:.1f} "
                   f"shortcut={shortcut:+.3f} init={init:+.3f} sum={shortcut_sum:+.3f} "
