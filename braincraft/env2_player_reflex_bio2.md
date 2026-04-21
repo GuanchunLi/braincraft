@@ -109,8 +109,8 @@ Live bio2 slots in allocator order:
 | `20` | `sin_n` | `sin` | `sin(phi)` trig helper for `pos_x` |
 | `21` | `cos_n` | `sin` | `cos(phi)` trig helper for `pos_y` |
 | `22` | `sin_sq` | `square` | `cos_n^2` magnitude (legacy name) |
-| `23` | `cos_pos` | `relu_tanh` | `-sin(phi) > 0` detector (legacy quadrant name) |
-| `24` | `cos_neg` | `relu_tanh` | `-sin(phi) < 0` detector (legacy quadrant name) |
+| `23` | `sin_pos` | `relu_tanh` | `sin(phi) > 0` detector |
+| `24` | `sin_neg` | `relu_tanh` | `sin(phi) < 0` detector |
 | `25` | `y_pos` | `relu_tanh` | `pos_y > 0` detector |
 | `26` | `y_neg` | `relu_tanh` | `pos_y < 0` detector |
 | `27` | `near_e` | `bump` | east-shifted corridor detector |
@@ -122,10 +122,10 @@ Live bio2 slots in allocator order:
 | `33` | `on_countdown` | `relu_tanh` | `sc_countdown > 0.5` |
 | `34` | `is_turn` | `relu_tanh` | turn phase gate |
 | `35` | `is_app` | `relu_tanh` | approach phase gate |
-| `36` | `cy_pp` | `relu_tanh` | `cos_pos AND y_pos AND is_turn` |
-| `37` | `cy_pn` | `relu_tanh` | `cos_pos AND y_neg AND is_turn` |
-| `38` | `cy_np` | `relu_tanh` | `cos_neg AND y_pos AND is_turn` |
-| `39` | `cy_nn` | `relu_tanh` | `cos_neg AND y_neg AND is_turn` |
+| `36` | `sy_pp` | `relu_tanh` | `sin_pos AND y_pos AND is_turn` |
+| `37` | `sy_pn` | `relu_tanh` | `sin_pos AND y_neg AND is_turn` |
+| `38` | `sy_np` | `relu_tanh` | `sin_neg AND y_pos AND is_turn` |
+| `39` | `sy_nn` | `relu_tanh` | `sin_neg AND y_neg AND is_turn` |
 | `40` | `front_block_pos` | `relu_tanh` | front block term for positive front sign |
 | `41` | `front_block_neg` | `relu_tanh` | front block term for negative front sign |
 | `42` | `l_ev` | `identity` | left-half blue evidence sum |
@@ -330,18 +330,17 @@ is_app(t+1)       = relu_tanh(k_sharp*(on_countdown(t) - is_turn(t) - 0.5))
 ```
 
 During the turn phase, four quadrant detectors implement
-`turn_toward = sign(sin(phi)) * sign(pos_y)`. The `cos_pos / cos_neg`
-helpers keep their legacy names but now test `sign(-sin(phi))`, so the
-same wiring yields the same turn direction as before the rename:
+`turn_toward = sign(sin(phi)) * sign(pos_y)` using the `sin_pos / sin_neg`
+sharp sign detectors on `sin(phi)`:
 
 ```text
-cy_pp(t+1) = relu_tanh(k_sharp*(cos_pos(t) + y_pos(t) + is_turn(t) - 2.5))
-cy_pn(t+1) = relu_tanh(k_sharp*(cos_pos(t) + y_neg(t) + is_turn(t) - 2.5))
-cy_np(t+1) = relu_tanh(k_sharp*(cos_neg(t) + y_pos(t) + is_turn(t) - 2.5))
-cy_nn(t+1) = relu_tanh(k_sharp*(cos_neg(t) + y_neg(t) + is_turn(t) - 2.5))
+sy_pp(t+1) = relu_tanh(k_sharp*(sin_pos(t) + y_pos(t) + is_turn(t) - 2.5))
+sy_pn(t+1) = relu_tanh(k_sharp*(sin_pos(t) + y_neg(t) + is_turn(t) - 2.5))
+sy_np(t+1) = relu_tanh(k_sharp*(sin_neg(t) + y_pos(t) + is_turn(t) - 2.5))
+sy_nn(t+1) = relu_tanh(k_sharp*(sin_neg(t) + y_neg(t) + is_turn(t) - 2.5))
 
 shortcut_steer(t+1) =
-    abs(shortcut_turn) * (cy_pn(t) + cy_np(t) - cy_pp(t) - cy_nn(t))
+    abs(shortcut_turn) * (sy_pp(t) + sy_nn(t) - sy_pn(t) - sy_np(t))
 ```
 
 ### 4.7 Blue evidence and front-block sign
@@ -433,6 +432,11 @@ Reward-circuit `K` absorption re-verification on 2026-04-20:
 `cos_n` / `sin_n` rename (with sign flip) re-verification on 2026-04-20:
 
 - `python braincraft\env2_player_reflex_bio2.py` -> `14.71 +/- 0.00`
+
+`cos_pos` / `cos_neg` rename to `sin_pos` / `sin_neg` (with matching
+`cy_*` → `sy_*` quadrant rewiring) re-verification on 2026-04-21:
+
+- `python braincraft\env2_player_reflex_bio2.py` -> `14.73 +/- 0.08`
 
 Multi-step seeding window (approach A, `seed_window_k = 6`) on 2026-04-21:
 

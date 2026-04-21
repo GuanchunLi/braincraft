@@ -91,8 +91,8 @@ def _bio2_indices(n_rays):
         "sin_n": 20,
         "cos_n": 21,
         "sin_sq": 22,
-        "cos_pos": 23,
-        "cos_neg": 24,
+        "sin_pos": 23,
+        "sin_neg": 24,
         "y_pos": 25,
         "y_neg": 26,
         "near_e": 27,
@@ -104,10 +104,10 @@ def _bio2_indices(n_rays):
         "on_countdown": 33,
         "is_turn": 34,
         "is_app": 35,
-        "cy_pp": 36,
-        "cy_pn": 37,
-        "cy_np": 38,
-        "cy_nn": 39,
+        "sy_pp": 36,
+        "sy_pn": 37,
+        "sy_np": 38,
+        "sy_nn": 39,
         "front_block_pos": 40,
         "front_block_neg": 41,
         "l_ev": 42,
@@ -236,8 +236,8 @@ def reflex_bio2_player():
     SIN_N    = idx["sin_n"]
     COS_N    = idx["cos_n"]
     SIN_SQ   = idx["sin_sq"]
-    COS_POS  = idx["cos_pos"]
-    COS_NEG  = idx["cos_neg"]
+    SIN_POS  = idx["sin_pos"]
+    SIN_NEG  = idx["sin_neg"]
     Y_POS    = idx["y_pos"]
     Y_NEG    = idx["y_neg"]
     HH       = idx["heading_horiz"]
@@ -251,10 +251,10 @@ def reflex_bio2_player():
     NEAR_E   = idx["near_e"]
     NEAR_W   = idx["near_w"]
     NEAR_CR  = idx["near_cr"]
-    CY_PP    = idx["cy_pp"]
-    CY_PN    = idx["cy_pn"]
-    CY_NP    = idx["cy_np"]
-    CY_NN    = idx["cy_nn"]
+    SY_PP    = idx["sy_pp"]
+    SY_PN    = idx["sy_pn"]
+    SY_NP    = idx["sy_np"]
+    SY_NN    = idx["sy_nn"]
 
     # ── Reflex feature neurons ───────────────────────────────────
     L_idx          = 20
@@ -349,10 +349,10 @@ def reflex_bio2_player():
     # Shortcut outputs.
     # Route shortcut steering and the initial correction pulse through
     # separate fixed slots so debug/docs can name them directly.
-    W[SHORTCUT_STEER, CY_PN] =  abs(shortcut_turn)   # cos+, y-  → +2
-    W[SHORTCUT_STEER, CY_NP] =  abs(shortcut_turn)   # cos-, y+  → +2
-    W[SHORTCUT_STEER, CY_PP] = -abs(shortcut_turn)   # cos+, y+  → -2
-    W[SHORTCUT_STEER, CY_NN] = -abs(shortcut_turn)   # cos-, y-  → -2
+    W[SHORTCUT_STEER, SY_PP] =  abs(shortcut_turn)   # sin+, y+  → +2
+    W[SHORTCUT_STEER, SY_NN] =  abs(shortcut_turn)   # sin-, y-  → +2
+    W[SHORTCUT_STEER, SY_PN] = -abs(shortcut_turn)   # sin+, y-  → -2
+    W[SHORTCUT_STEER, SY_NP] = -abs(shortcut_turn)   # sin-, y+  → -2
 
     # During the initial seed window, SEED_{POS,NEG} track the residual
     # signed depth asymmetry and INIT_IMPULSE contributes its negation.
@@ -444,11 +444,10 @@ def reflex_bio2_player():
     # sin_sq stores cos(phi)^2; heading_horiz uses it against sin_horiz_thr.
     W[SIN_SQ, COS_N] = 1.0
 
-    # COS_POS/COS_NEG feed the shortcut quadrant logic, which keys off the
-    # sign of -sin(phi) (the old cos_n) rather than true cos(phi). Hence the
-    # wiring to sin_n with flipped signs.
-    W[COS_POS, SIN_N] = -k_sharp
-    W[COS_NEG, SIN_N] =  k_sharp
+    # SIN_POS/SIN_NEG feed the shortcut quadrant logic as sharp sign
+    # detectors on sin(phi).
+    W[SIN_POS, SIN_N] =  k_sharp
+    W[SIN_NEG, SIN_N] = -k_sharp
 
     # Y_POS/Y_NEG feed quadrant sign logic as sign(y) - saturation OK.
     W[Y_POS, POS_Y] = k_sharp
@@ -513,32 +512,31 @@ def reflex_bio2_player():
     Win[ISA, bias_idx] = -0.5 * k_sharp
     # Turn direction quadrants.
     # turn_toward = sign(sin(phi)) * sign(y).
-    # COS_POS / COS_NEG are legacy names; they test sign(-sin(phi)).
-    # Quadrant ANDs (each is a 3-way AND of COS sign, Y sign, IS_TURN):
-    #   cy_pp: cos+, y+  →  -1
-    #   cy_pn: cos+, y-  →  +1
-    #   cy_np: cos-, y+  →  +1
-    #   cy_nn: cos-, y-  →  -1
-    # Each CY_* is z = K*(a + b + c - 2.5), rt ~1 iff all three are 1.
-    W[CY_PP, COS_POS] = k_sharp
-    W[CY_PP, Y_POS]   = k_sharp
-    W[CY_PP, IST]     = k_sharp
-    Win[CY_PP, bias_idx] = -2.5 * k_sharp
+    # Quadrant ANDs (each is a 3-way AND of SIN sign, Y sign, IS_TURN):
+    #   sy_pp: sin+, y+  →  +1
+    #   sy_pn: sin+, y-  →  -1
+    #   sy_np: sin-, y+  →  -1
+    #   sy_nn: sin-, y-  →  +1
+    # Each SY_* is z = K*(a + b + c - 2.5), rt ~1 iff all three are 1.
+    W[SY_PP, SIN_POS] = k_sharp
+    W[SY_PP, Y_POS]   = k_sharp
+    W[SY_PP, IST]     = k_sharp
+    Win[SY_PP, bias_idx] = -2.5 * k_sharp
 
-    W[CY_PN, COS_POS] = k_sharp
-    W[CY_PN, Y_NEG]   = k_sharp
-    W[CY_PN, IST]     = k_sharp
-    Win[CY_PN, bias_idx] = -2.5 * k_sharp
+    W[SY_PN, SIN_POS] = k_sharp
+    W[SY_PN, Y_NEG]   = k_sharp
+    W[SY_PN, IST]     = k_sharp
+    Win[SY_PN, bias_idx] = -2.5 * k_sharp
 
-    W[CY_NP, COS_NEG] = k_sharp
-    W[CY_NP, Y_POS]   = k_sharp
-    W[CY_NP, IST]     = k_sharp
-    Win[CY_NP, bias_idx] = -2.5 * k_sharp
+    W[SY_NP, SIN_NEG] = k_sharp
+    W[SY_NP, Y_POS]   = k_sharp
+    W[SY_NP, IST]     = k_sharp
+    Win[SY_NP, bias_idx] = -2.5 * k_sharp
 
-    W[CY_NN, COS_NEG] = k_sharp
-    W[CY_NN, Y_NEG]   = k_sharp
-    W[CY_NN, IST]     = k_sharp
-    Win[CY_NN, bias_idx] = -2.5 * k_sharp
+    W[SY_NN, SIN_NEG] = k_sharp
+    W[SY_NN, Y_NEG]   = k_sharp
+    W[SY_NN, IST]     = k_sharp
+    Win[SY_NN, bias_idx] = -2.5 * k_sharp
     # Copy Wout row 0 into W[dtheta, :] as the last step so
     # z_dtheta(t+1) = O(t).
     for j in range(n):
