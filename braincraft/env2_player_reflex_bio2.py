@@ -20,7 +20,7 @@ The dense bio2 layout is grouped as:
   0..4   reflex features
   5..8   dtheta, dir_accum, pos_x, pos_y
   9..12  initial-heading correction latch
-  13, 15..19 reward and shortcut state (slot 14 vacated)
+  13, 15..19 reward and shortcut state (slot 14 = step_counter for seeding)
   20..39 trig, corridor, and shortcut-trigger helpers
   40..57 shortcut-phase, front-block, and color-evidence helpers
   58..   xi_blue ray bank
@@ -57,6 +57,12 @@ gate_c           = 1.0
 k_sharp = 50.0     # large enough to saturate tanh near |z|>0.1
 step_a  = np.radians(5.0)
 
+# Multi-step seeding window: seed_pos/seed_neg stay active for the first
+# seed_window_k steps (approach A in the robustness plan). SEEDED_FLAG
+# gates on once step_counter >= seed_window_k, giving INIT_IMPULSE that
+# many closed-loop correction cycles before steady-state.
+seed_window_k = 3
+
 
 # ── Neuron index layout ────────────────────────────────────────────
 def _bio2_indices(n_rays):
@@ -76,6 +82,7 @@ def _bio2_indices(n_rays):
         "seed_pos": 11,
         "seed_neg": 12,
         "energy_ramp": 13,
+        "step_counter": 14,
         "reward_pulse": 15,
         "reward_latch": 16,
         "sc_countdown": 17,
@@ -144,6 +151,7 @@ def make_activation(a, idx):
         idx["evidence"],
         idx["l_ev"],
         idx["r_ev"],
+        idx["step_counter"],
     ]
     sin_list = [idx["sin_n"], idx["cos_n"]]
     square_list = [idx["sin_sq"]]
@@ -215,6 +223,7 @@ def reflex_bio2_player():
     HEAD_CORR = idx["head_corr"]
     SEEDED_FLAG = idx["seeded_flag"]
     ENERGY_RAMP = idx["energy_ramp"]
+    STEP_COUNTER = idx["step_counter"]
     REWARD_PULSE = idx["reward_pulse"]
     REWARD_LATCH = idx["reward_latch"]
     SC_COUNTDOWN = idx["sc_countdown"]
@@ -329,8 +338,19 @@ def reflex_bio2_player():
     arm_gate        = 1000.0
     latch_gain      = 10.0
 
-    # seeded_flag saturates to 1 at step 1.
-    Win[SEEDED_FLAG, bias_idx] = 10.0
+    # step_counter: identity activation, increments by 1 every step from 0.
+    # step_counter(t) = t. Used by seeded_flag's sharp threshold.
+    W[STEP_COUNTER, STEP_COUNTER] = 1.0
+    Win[STEP_COUNTER, bias_idx] = 1.0
+
+    # seeded_flag: gates on once step_counter(t) >= seed_window_k - 1.5,
+    # so seeded_flag(t) = 0 for t = 0..seed_window_k-1 and saturates to 1
+    # for t >= seed_window_k. Since seed_pos(t+1) reads seeded_flag(t), the
+    # seeds fire for exactly seed_window_k network steps
+    # (t = 1..seed_window_k). seed_window_k = 1 reproduces the original
+    # single-step behaviour.
+    W[SEEDED_FLAG, STEP_COUNTER] = k_sharp
+    Win[SEEDED_FLAG, bias_idx] = -k_sharp * (float(seed_window_k) - 1.5)
 
     Win[ENERGY_RAMP, energy_idx] = 1.0
     Win[REWARD_PULSE, energy_idx] = pulse_gain

@@ -35,7 +35,7 @@ scalar function `f_i`:
 | Name | Formula | Used by |
 | --- | --- | --- |
 | `relu_tanh` | `max(0, tanh(z))` | default thresholds, gates, latches |
-| `identity` | `z` | `dir_accum`, `pos_x`, `pos_y`, `head_corr`, `shortcut_steer`, `init_impulse`, `evidence`, `l_ev`, `r_ev` |
+| `identity` | `z` | `dir_accum`, `pos_x`, `pos_y`, `head_corr`, `shortcut_steer`, `init_impulse`, `evidence`, `l_ev`, `r_ev`, `step_counter` |
 | `relu` | `max(0, z)` | `energy_ramp`, `sc_countdown` |
 | `clip_a` | `clip(z, -step_a, step_a)` | `dtheta` |
 | `sin` | `sin(z)` | `cos_n`, `sin_n` |
@@ -58,6 +58,7 @@ gate_c             = 1.0
 k_sharp            = 50.0
 step_a             = 5 deg
 cal_gain           = 1 / 0.173
+seed_window_k      = 6
 ```
 
 ## 3. Inputs and Allocator
@@ -99,7 +100,7 @@ Live bio2 slots in allocator order:
 | `11` | `seed_pos` | `relu_tanh` | positive initial-correction pulse |
 | `12` | `seed_neg` | `relu_tanh` | negative initial-correction pulse |
 | `13` | `energy_ramp` | `relu` | energy ramp for reward trigger |
-| `14` | _(vacated)_ | — | reserved; no inbound or outbound wiring |
+| `14` | `step_counter` | `identity` | step index (0, 1, 2, ...), drives `seeded_flag` timing |
 | `15` | `reward_pulse` | `relu_tanh` | reward pulse detector |
 | `16` | `reward_latch` | `relu_tanh` | latched reward signal |
 | `17` | `sc_countdown` | `relu` | shortcut countdown |
@@ -217,19 +218,34 @@ The raw initial correction is
 current_corr(t) = (prox[R_idx](t) - prox[L_idx](t)) * cal_gain.
 ```
 
-The latch is built from `seeded_flag`, `seed_pos`, `seed_neg`, and `head_corr`:
+The latch is built from `step_counter`, `seeded_flag`, `seed_pos`,
+`seed_neg`, and `head_corr`. `step_counter` is a simple identity-activation
+counter that increments each step, and `seeded_flag` is a sharp threshold
+against it:
 
 ```text
-seeded_flag(t+1) = relu_tanh(10)
-seed_pos(t+1)    = relu_tanh(-cal_gain*prox[L_idx](t) + cal_gain*prox[R_idx](t) - 1000*seeded_flag(t))
-seed_neg(t+1)    = relu_tanh( cal_gain*prox[L_idx](t) - cal_gain*prox[R_idx](t) - 1000*seeded_flag(t))
+step_counter(t+1) = step_counter(t) + 1           # identity, so step_counter(t) = t
+seeded_flag(t+1)  = relu_tanh(k_sharp*(step_counter(t) - (seed_window_k - 1.5)))
 
-head_corr(t+1)   = head_corr(t) + seed_pos(t) - seed_neg(t)
-init_impulse(t+1)= -seed_pos(t) + seed_neg(t)
+seed_pos(t+1) = relu_tanh(-cal_gain*prox[L_idx](t) + cal_gain*prox[R_idx](t) - 1000*seeded_flag(t))
+seed_neg(t+1) = relu_tanh( cal_gain*prox[L_idx](t) - cal_gain*prox[R_idx](t) - 1000*seeded_flag(t))
+
+head_corr(t+1)    = head_corr(t) + seed_pos(t) - seed_neg(t)
+init_impulse(t+1) = -seed_pos(t) + seed_neg(t)
 ```
 
-This reproduces the original latched correction with a one-step delay:
-`head_corr(0) = 0`, then the initial correction is held from `t = 1` onward.
+With `seed_window_k = 6`, `seeded_flag(t) = 0` for `t = 0..5` and
+saturates to `1` for `t >= 6`. Since `seed_pos(t+1)` reads
+`seeded_flag(t)`, the seeds fire for six consecutive network steps
+(`t = 1..6`). `head_corr` integrates each step's residual depth
+asymmetry, and `init_impulse` steers against the remaining
+perturbation. This replaces the previous single-step impulse, which was
+exact on good draws but produced a ~1.6° residual on rare bad draws
+(positive initial-heading perturbation) that accumulated into the 8th
+shortcut approach and caused wall contact. The closed-loop multi-step
+correction drives the residual toward zero regardless of perturbation
+sign. See [plans/reflex_bio2_init_heading_robustness_plan.md](plans/reflex_bio2_init_heading_robustness_plan.md)
+for the K sweep and failure-mode analysis.
 
 ### 4.4 Reward circuit
 
@@ -261,14 +277,17 @@ reward_latch(t+1) = relu_tanh(
 ```
 
 `seeded_flag` (already used to gate the initial-heading seeds) acts as the
-arm gate: it is `0` at `t=0` and saturates to `1` from `t=1` onward, so
-`reward_pulse(1) = 0` is clamped off by the `-1000.2` bias, and from `t=2`
-onward the neuron reduces to `relu_tanh(500 * Delta energy(t) - 0.2)` --
-a sharp rising-edge detector on the energy signal. This removes the
-dedicated `armed_latch` neuron: its sole purpose was to wait for the
-first non-zero `energy_ramp` before arming, but since `energy(0) ~ 1`
-under the env2 bot, `seeded_flag`'s bias-driven one-step latch provides
-the same guarantee one step earlier without extra state.
+arm gate: it is `0` for the first `seed_window_k` steps and saturates to
+`1` afterward. During the unseeded window `reward_pulse` is clamped off
+by the `-1000.2` bias, and from step `seed_window_k + 1` onward the
+neuron reduces to `relu_tanh(500 * Delta energy(t) - 0.2)` -- a sharp
+rising-edge detector on the energy signal. Delaying arming by a handful
+of steps is safe because the first reward event does not occur until
+step ~73 and the bot, starting from a fixed non-source cell, covers too
+little ground in `seed_window_k ~ 6` steps to reach any source. This
+removes the dedicated `armed_latch` neuron: its sole purpose was to
+wait for the first non-zero `energy_ramp` before arming, and
+`seeded_flag` provides the same guarantee without extra state.
 
 ### 4.5 Blue evidence and front-block sign
 
@@ -416,3 +435,11 @@ Reward-circuit `K` absorption re-verification on 2026-04-20:
 `cos_n` / `sin_n` rename (with sign flip) re-verification on 2026-04-20:
 
 - `python braincraft\env2_player_reflex_bio2.py` -> `14.71 +/- 0.00`
+
+Multi-step seeding window (approach A, `seed_window_k = 6`) on 2026-04-21:
+
+- Previously-failing outer seed `101`: `14.589 / 0.363` -> `14.741 / 0.110`
+- Previously-failing inner seed `311895`: `13.50, 21 hits` -> `14.71, 0 hits`
+- 20-seed broader sweep (rng seed `20260421`): mean-of-means
+  `14.7039 -> 14.7275`, max std `0.366 -> 0.107`, failure-tail seeds
+  `1/20 -> 0/20`.
