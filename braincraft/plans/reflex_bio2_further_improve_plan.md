@@ -1,3 +1,3 @@
-1. naming of variables of direction circuit: current cos_n and sin_n is confusing; can we correct that? current `cos_n` should be `sin_n` (also flipping the sign if possible); and current `sin_n` should be `cos+_n`. Change all related formulas.
-2. For 4.1; hit_feat maybe not useful? If so, please remove it and update all the indexes correspondingly. ALso, do we need 100*k_sharp or k_sharp itself is enough?
-3. Explain more on reward circuit? (what's the role of armed_katch)
+1. CHECKED -- naming of variables of direction circuit: current cos_n and sin_n is confusing; can we correct that? current `cos_n` should be `sin_n` (also flipping the sign if possible); and current `sin_n` should be `cos+_n`. Change all related formulas. 
+2. For 4.1; hit_feat maybe not useful? If so, please remove it and update all the indexes correspondingly. ALso, do we need 100*k_sharp or k_sharp itself is enough? Also, is possible to merge prox_left and safe_left (same for prox_right and safe_right)?
+3. CHECKED -- Explain more on reward circuit? (what's the role of armed_katch)

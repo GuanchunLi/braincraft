@@ -99,7 +99,7 @@ Live bio2 slots in allocator order:
 | `11` | `seed_pos` | `relu_tanh` | positive initial-correction pulse |
 | `12` | `seed_neg` | `relu_tanh` | negative initial-correction pulse |
 | `13` | `energy_ramp` | `relu` | energy ramp for reward trigger |
-| `14` | `armed_latch` | `relu_tanh` | reward arming latch |
+| `14` | _(vacated)_ | — | reserved; no inbound or outbound wiring |
 | `15` | `reward_pulse` | `relu_tanh` | reward pulse detector |
 | `16` | `reward_latch` | `relu_tanh` | latched reward signal |
 | `17` | `sc_countdown` | `relu` | shortcut countdown |
@@ -236,8 +236,6 @@ This reproduces the original latched correction with a one-step delay:
 With
 
 ```text
-arm_from_energy = 5
-arm_latch       = 10
 pulse_gain      = 500
 pulse_thr       = 0.2
 arm_gate        = 1000
@@ -249,15 +247,10 @@ the reward neurons satisfy
 ```text
 energy_ramp(t+1) = relu(energy(t))
 
-armed_latch(t+1) = relu_tanh(
-    arm_from_energy * energy_ramp(t)
-  + arm_latch       * armed_latch(t)
-)
-
 reward_pulse(t+1) = relu_tanh(
     pulse_gain * energy(t)
   - pulse_gain * energy_ramp(t)
-  + arm_gate   * armed_latch(t)
+  + arm_gate   * seeded_flag(t)
   - (arm_gate + pulse_thr)
 )
 
@@ -267,11 +260,15 @@ reward_latch(t+1) = relu_tanh(
 )
 ```
 
-Because `energy_ramp` uses a pure `relu`, its preactivation does not need
-to sit in the linear region of `tanh`. The historical pre-scaling
-`K = 0.005` has been absorbed into `arm_from_energy` and `pulse_gain`, so
-the effective coefficients (`5 * energy` on `armed_latch`,
-`500 * Delta energy` on `reward_pulse`) match the previous circuit exactly.
+`seeded_flag` (already used to gate the initial-heading seeds) acts as the
+arm gate: it is `0` at `t=0` and saturates to `1` from `t=1` onward, so
+`reward_pulse(1) = 0` is clamped off by the `-1000.2` bias, and from `t=2`
+onward the neuron reduces to `relu_tanh(500 * Delta energy(t) - 0.2)` --
+a sharp rising-edge detector on the energy signal. This removes the
+dedicated `armed_latch` neuron: its sole purpose was to wait for the
+first non-zero `energy_ramp` before arming, but since `energy(0) ~ 1`
+under the env2 bot, `seeded_flag`'s bias-driven one-step latch provides
+the same guarantee one step earlier without extra state.
 
 ### 4.5 Blue evidence and front-block sign
 

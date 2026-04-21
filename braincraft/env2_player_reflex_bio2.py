@@ -20,7 +20,7 @@ The dense bio2 layout is grouped as:
   0..4   reflex features
   5..8   dtheta, dir_accum, pos_x, pos_y
   9..12  initial-heading correction latch
-  13..19 reward and shortcut state
+  13, 15..19 reward and shortcut state (slot 14 vacated)
   20..39 trig, corridor, and shortcut-trigger helpers
   40..57 shortcut-phase, front-block, and color-evidence helpers
   58..   xi_blue ray bank
@@ -76,7 +76,6 @@ def _bio2_indices(n_rays):
         "seed_pos": 11,
         "seed_neg": 12,
         "energy_ramp": 13,
-        "armed_latch": 14,
         "reward_pulse": 15,
         "reward_latch": 16,
         "sc_countdown": 17,
@@ -216,7 +215,6 @@ def reflex_bio2_player():
     HEAD_CORR = idx["head_corr"]
     SEEDED_FLAG = idx["seeded_flag"]
     ENERGY_RAMP = idx["energy_ramp"]
-    ARMED_LATCH = idx["armed_latch"]
     REWARD_PULSE = idx["reward_pulse"]
     REWARD_LATCH = idx["reward_latch"]
     SC_COUNTDOWN = idx["sc_countdown"]
@@ -323,25 +321,24 @@ def reflex_bio2_player():
     W[HEAD_CORR, HEAD_CORR] = 1.0
     W[HEAD_CORR, SEEDP] = 1.0
     W[HEAD_CORR, SEEDN] = -1.0
-    # Reward circuit.
-    arm_from_energy = 5.0
-    arm_latch       = 10.0
+    # Reward circuit. SEEDED_FLAG (0 at step 0, saturated to 1 from step 1
+    # onward) gates REWARD_PULSE so it cannot fire at step 1 before
+    # ENERGY_RAMP has a valid previous-energy reference.
     pulse_gain      = 500.0
     pulse_thr       = 0.2
     arm_gate        = 1000.0
     latch_gain      = 10.0
 
+    # seeded_flag saturates to 1 at step 1.
+    Win[SEEDED_FLAG, bias_idx] = 10.0
+
     Win[ENERGY_RAMP, energy_idx] = 1.0
-    W[ARMED_LATCH, ENERGY_RAMP] = arm_from_energy
-    W[ARMED_LATCH, ARMED_LATCH] = arm_latch
     Win[REWARD_PULSE, energy_idx] = pulse_gain
     W[REWARD_PULSE, ENERGY_RAMP] = -pulse_gain
-    W[REWARD_PULSE, ARMED_LATCH] = arm_gate
+    W[REWARD_PULSE, SEEDED_FLAG] = arm_gate
     Win[REWARD_PULSE, bias_idx] = -(arm_gate + pulse_thr)
     W[REWARD_LATCH, REWARD_PULSE] = latch_gain
     W[REWARD_LATCH, REWARD_LATCH] = latch_gain
-    # seeded_flag saturates to 1 at step 1.
-    Win[SEEDED_FLAG, bias_idx] = 10.0
     # Shortcut outputs.
     # Route shortcut steering and the one-shot init impulse through
     # separate fixed slots so debug/docs can name them directly.
