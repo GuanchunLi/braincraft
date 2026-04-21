@@ -40,7 +40,7 @@ scalar function `f_i`:
 | `clip_a` | `clip(z, -step_a, step_a)` | `dtheta` |
 | `sin` | `sin(z)` | `cos_n`, `sin_n` |
 | `square` | `z^2` | `sin_sq` |
-| `bump` | `max(0, 1 - 4 z^2)` | `near_c`, `near_e`, `near_w`, `xi_blue[*]` |
+| `bump` | `max(0, 1 - 4 z^2)` | `near_e`, `near_w`, `xi_blue[*]` |
 
 Module constants:
 
@@ -113,38 +113,31 @@ Live bio2 slots in allocator order:
 | `24` | `cos_neg` | `relu_tanh` | `-sin(phi) < 0` detector (legacy quadrant name) |
 | `25` | `y_pos` | `relu_tanh` | `pos_y > 0` detector |
 | `26` | `y_neg` | `relu_tanh` | `pos_y < 0` detector |
-| `27` | `cos_big_pos` | `relu_tanh` | `-sin(phi) > 0.5` detector (legacy quadrant name) |
-| `28` | `cos_big_neg` | `relu_tanh` | `-sin(phi) < -0.5` detector (legacy quadrant name) |
-| `29` | `cos_small` | `relu_tanh` | `|sin(phi)| <= 0.5` detector (legacy quadrant name) |
-| `30` | `near_c` | `bump` | near-center corridor detector |
-| `31` | `near_e` | `bump` | east-shifted corridor detector |
-| `32` | `near_w` | `bump` | west-shifted corridor detector |
-| `33` | `ncr_e` | `relu_tanh` | `cos_big_pos AND near_e` |
-| `34` | `ncr_w` | `relu_tanh` | `cos_big_neg AND near_w` |
-| `35` | `ncr_c` | `relu_tanh` | `cos_small AND near_c` |
-| `36` | `near_cr` | `relu_tanh` | corridor predicate used by shortcut trigger |
-| `37` | `heading_horiz` | `relu_tanh` | near-horizontal heading detector |
-| `38` | `front_clear` | `relu_tanh` | no front-block detector |
-| `39` | `trig_sc` | `relu_tanh` | shortcut trigger pulse |
-| `40` | `on_countdown` | `relu_tanh` | `sc_countdown > 0.5` |
-| `41` | `is_turn` | `relu_tanh` | turn phase gate |
-| `42` | `is_app` | `relu_tanh` | approach phase gate |
-| `43` | `cy_pp` | `relu_tanh` | `cos_pos AND y_pos AND is_turn` |
-| `44` | `cy_pn` | `relu_tanh` | `cos_pos AND y_neg AND is_turn` |
-| `45` | `cy_np` | `relu_tanh` | `cos_neg AND y_pos AND is_turn` |
-| `46` | `cy_nn` | `relu_tanh` | `cos_neg AND y_neg AND is_turn` |
-| `47` | `front_block_pos` | `relu_tanh` | front block term for positive front sign |
-| `48` | `front_block_neg` | `relu_tanh` | front block term for negative front sign |
-| `49` | `l_ev` | `identity` | left-half blue evidence sum |
-| `50` | `r_ev` | `identity` | right-half blue evidence sum |
-| `51` | `dleft` | `relu_tanh` | left-dominance pulse |
-| `52` | `dright` | `relu_tanh` | right-dominance pulse |
-| `53` | `evidence` | `identity` | signed color evidence accumulator |
-| `54` | `trig_pos` | `relu_tanh` | positive evidence trigger |
-| `55` | `trig_neg` | `relu_tanh` | negative evidence trigger |
-| `56` | `fs_pos` | `relu_tanh` | latched positive front sign |
-| `57` | `fs_neg` | `relu_tanh` | latched negative front sign |
-| `58..121` | `xi_blue[0..63]` | `bump` | per-ray blue detector centered at color value `4` |
+| `27` | `near_e` | `bump` | east-shifted corridor detector |
+| `28` | `near_w` | `bump` | west-shifted corridor detector |
+| `29` | `near_cr` | `relu_tanh` | corridor predicate (OR of `near_e`, `near_w`) |
+| `30` | `heading_horiz` | `relu_tanh` | near-horizontal heading detector |
+| `31` | `front_clear` | `relu_tanh` | no front-block detector |
+| `32` | `trig_sc` | `relu_tanh` | shortcut trigger pulse |
+| `33` | `on_countdown` | `relu_tanh` | `sc_countdown > 0.5` |
+| `34` | `is_turn` | `relu_tanh` | turn phase gate |
+| `35` | `is_app` | `relu_tanh` | approach phase gate |
+| `36` | `cy_pp` | `relu_tanh` | `cos_pos AND y_pos AND is_turn` |
+| `37` | `cy_pn` | `relu_tanh` | `cos_pos AND y_neg AND is_turn` |
+| `38` | `cy_np` | `relu_tanh` | `cos_neg AND y_pos AND is_turn` |
+| `39` | `cy_nn` | `relu_tanh` | `cos_neg AND y_neg AND is_turn` |
+| `40` | `front_block_pos` | `relu_tanh` | front block term for positive front sign |
+| `41` | `front_block_neg` | `relu_tanh` | front block term for negative front sign |
+| `42` | `l_ev` | `identity` | left-half blue evidence sum |
+| `43` | `r_ev` | `identity` | right-half blue evidence sum |
+| `44` | `dleft` | `relu_tanh` | left-dominance pulse |
+| `45` | `dright` | `relu_tanh` | right-dominance pulse |
+| `46` | `evidence` | `identity` | signed color evidence accumulator |
+| `47` | `trig_pos` | `relu_tanh` | positive evidence trigger |
+| `48` | `trig_neg` | `relu_tanh` | negative evidence trigger |
+| `49` | `fs_pos` | `relu_tanh` | latched positive front sign |
+| `50` | `fs_neg` | `relu_tanh` | latched negative front sign |
+| `51..114` | `xi_blue[0..63]` | `bump` | per-ray blue detector centered at color value `4` |
 
 ## 4. Main Circuits
 
@@ -154,11 +147,11 @@ The five reflex features are feed-forward proximity/hit channels, suppressed
 during shortcut approach:
 
 ```text
-hit_feat(t+1)   = relu_tanh(hit(t) - 100*k_sharp*is_app(t))
-prox_left(t+1)  = relu_tanh(prox[L_idx](t) - 100*k_sharp*is_app(t))
-prox_right(t+1) = relu_tanh(prox[R_idx](t) - 100*k_sharp*is_app(t))
-safe_left(t+1)  = relu_tanh(-prox[left_side_idx](t)  + 0.75 - 100*k_sharp*is_app(t))
-safe_right(t+1) = relu_tanh(-prox[right_side_idx](t) + 0.75 - 100*k_sharp*is_app(t))
+hit_feat(t+1)   = relu_tanh(hit(t) - k_sharp*is_app(t))
+prox_left(t+1)  = relu_tanh(prox[L_idx](t) - k_sharp*is_app(t))
+prox_right(t+1) = relu_tanh(prox[R_idx](t) - k_sharp*is_app(t))
+safe_left(t+1)  = relu_tanh(-prox[left_side_idx](t)  + 0.75 - k_sharp*is_app(t))
+safe_right(t+1) = relu_tanh(-prox[right_side_idx](t) + 0.75 - k_sharp*is_app(t))
 ```
 
 The steering readout is
@@ -329,25 +322,24 @@ with `front_thr = 1.4`.
 
 ### 4.6 Corridor tests and shortcut trigger
 
-The bump-based corridor detectors are driven by `pos_x`:
+Two bump-based offset corridor detectors are driven by `pos_x`. `near_e`
+fires when `pos_x` is near `-drift_offset` (bot west of centre, about to
+cross if heading east); `near_w` is the mirror:
 
 ```text
-near_c(t+1) = bump(pos_x(t) / (2*near_c_thr))
 near_e(t+1) = bump((pos_x(t) + drift_offset) / (2*near_c_thr))
 near_w(t+1) = bump((pos_x(t) - drift_offset) / (2*near_c_thr))
 ```
 
-Heading and corridor helpers:
+The corridor predicate `near_cr` is simply their OR. An earlier layout
+included a central detector `near_c` plus directional gates
+(`cos_big_pos`/`cos_big_neg`/`cos_small` feeding `ncr_e`/`ncr_w`/`ncr_c`),
+but those seven helpers were provably redundant under the
+`heading_horiz` (`|sin(phi)| > 0.937`) conjunction in `trig_sc` — ablation
+left the accepted score unchanged, so they were removed:
 
 ```text
-cos_big_pos(t+1) = relu_tanh(k_sharp*(-sin_n(t) - 0.5))   # sin(phi) < -0.5
-cos_big_neg(t+1) = relu_tanh(k_sharp*( sin_n(t) - 0.5))   # sin(phi) >  0.5
-cos_small(t+1)   = relu_tanh(k_sharp*(0.5 - cos_big_pos(t) - cos_big_neg(t)))
-
-ncr_e(t+1)   = relu_tanh(k_sharp*(cos_big_pos(t) + near_e(t) - 1.2))
-ncr_w(t+1)   = relu_tanh(k_sharp*(cos_big_neg(t) + near_w(t) - 1.2))
-ncr_c(t+1)   = relu_tanh(k_sharp*(cos_small(t)   + near_c(t) - 1.2))
-near_cr(t+1) = relu_tanh(k_sharp*(ncr_e(t) + ncr_w(t) + ncr_c(t) - 0.5))
+near_cr(t+1) = relu_tanh(k_sharp*(near_e(t) + near_w(t) - 0.5))
 
 heading_horiz(t+1) = relu_tanh(k_sharp*(1 - sin_sq(t) / sin_horiz_thr^2))
 front_clear(t+1)   = relu_tanh(k_sharp*(0.1 - front_block_pos(t) - front_block_neg(t)))
