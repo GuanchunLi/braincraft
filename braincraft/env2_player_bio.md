@@ -120,29 +120,29 @@ Hidden slots in allocator order:
 | 25        | `y_neg`           | `relu_tanh` | `pos_y < 0` sharp detector                         |
 | 26        | `near_e`          | `bump`      | east-shifted corridor bump                         |
 | 27        | `near_w`          | `bump`      | west-shifted corridor bump                         |
-| 28        | `near_cr`         | `relu_tanh` | corridor predicate (OR of `near_cr_e`, `near_cr_w`) |
-| 30        | `trig_sc`         | `relu_tanh` | shortcut trigger pulse                             |
-| 31        | `on_countdown`    | `relu_tanh` | `sc_countdown > 0.5`                               |
-| 32        | `is_turn`         | `relu_tanh` | turn-phase gate                                    |
-| 33        | `is_app`          | `relu_tanh` | approach-phase gate                                |
-| 34        | `sy_pp`           | `relu_tanh` | AND(`sin_pos`, `y_pos`, `is_turn`)                 |
-| 35        | `sy_pn`           | `relu_tanh` | AND(`sin_pos`, `y_neg`, `is_turn`)                 |
-| 36        | `sy_np`           | `relu_tanh` | AND(`sin_neg`, `y_pos`, `is_turn`)                 |
-| 37        | `sy_nn`           | `relu_tanh` | AND(`sin_neg`, `y_neg`, `is_turn`)                 |
-| 38        | `front_block_pos` | `relu_tanh` | front-block for positive front sign                |
-| 39        | `front_block_neg` | `relu_tanh` | front-block for negative front sign                |
-| 40        | `l_ev`            | `identity`  | left-half blue evidence sum                        |
-| 41        | `r_ev`            | `identity`  | right-half blue evidence sum                       |
-| 42        | `dleft`           | `relu_tanh` | left-dominance pulse                               |
-| 43        | `dright`          | `relu_tanh` | right-dominance pulse                              |
-| 44        | `evidence`        | `identity`  | signed colour-evidence accumulator                 |
-| 45        | `trig_pos`        | `relu_tanh` | positive-evidence trigger                          |
-| 46        | `trig_neg`        | `relu_tanh` | negative-evidence trigger                          |
-| 47        | `fs_pos`          | `relu_tanh` | latched positive front sign                        |
-| 48        | `fs_neg`          | `relu_tanh` | latched negative front sign                        |
-| 49        | `near_cr_e`       | `relu_tanh` | AND(`near_e`, heading east)                        |
-| 50        | `near_cr_w`       | `relu_tanh` | AND(`near_w`, heading west)                        |
-| 51..114   | `xi_blue[0..63]`  | `bump`      | per-ray blue detector (bump centred at colour `4`) |
+| 28        | `near_cr_e`       | `relu_tanh` | AND(`near_e`, heading east)                        |
+| 29        | `near_cr_w`       | `relu_tanh` | AND(`near_w`, heading west)                        |
+| 30        | `near_cr`         | `relu_tanh` | corridor predicate (OR of `near_cr_e`, `near_cr_w`) |
+| 31        | `trig_sc`         | `relu_tanh` | shortcut trigger pulse                             |
+| 32        | `on_countdown`    | `relu_tanh` | `sc_countdown > 0.5`                               |
+| 33        | `is_turn`         | `relu_tanh` | turn-phase gate                                    |
+| 34        | `is_app`          | `relu_tanh` | approach-phase gate                                |
+| 35        | `sy_pp`           | `relu_tanh` | AND(`sin_pos`, `y_pos`, `is_turn`)                 |
+| 36        | `sy_pn`           | `relu_tanh` | AND(`sin_pos`, `y_neg`, `is_turn`)                 |
+| 37        | `sy_np`           | `relu_tanh` | AND(`sin_neg`, `y_pos`, `is_turn`)                 |
+| 38        | `sy_nn`           | `relu_tanh` | AND(`sin_neg`, `y_neg`, `is_turn`)                 |
+| 39        | `front_block_pos` | `relu_tanh` | front-block for positive front sign                |
+| 40        | `front_block_neg` | `relu_tanh` | front-block for negative front sign                |
+| 41        | `l_ev`            | `identity`  | left-half blue evidence sum                        |
+| 42        | `r_ev`            | `identity`  | right-half blue evidence sum                       |
+| 43        | `dleft`           | `relu_tanh` | left-dominance pulse                               |
+| 44        | `dright`          | `relu_tanh` | right-dominance pulse                              |
+| 45        | `evidence`        | `identity`  | signed colour-evidence accumulator                 |
+| 46        | `trig_pos`        | `relu_tanh` | positive-evidence trigger                          |
+| 47        | `trig_neg`        | `relu_tanh` | negative-evidence trigger                          |
+| 48        | `fs_pos`          | `relu_tanh` | latched positive front sign                        |
+| 49        | `fs_neg`          | `relu_tanh` | latched negative front sign                        |
+| 50..113   | `xi_blue[0..63]`  | `bump`      | per-ray blue detector (bump centred at colour `4`) |
 
 ## 5. Main circuits
 

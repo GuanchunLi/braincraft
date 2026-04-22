@@ -25,10 +25,9 @@ The hidden pool packs one functional slot per neuron:
     5..8    dtheta, integrated heading, position accumulators
     9..13   initial-heading correction latch
     14..19  energy-based reward circuit and shortcut actuators
-    20..30  trig helpers, corridor predicates, shortcut trigger
-    31..48  phase gates, quadrant ANDs, blue-evidence front-block
-    49..50  heading-gated corridor-entry detectors
-    51..    per-ray blue-bump detectors
+    20..31  trig helpers, corridor predicates, shortcut trigger
+    32..49  phase gates, quadrant ANDs, blue-evidence front-block
+    50..    per-ray blue-bump detectors
 
 Constants use snake_case; local hidden-state aliases use UPPER_SNAKE.
 """
@@ -91,30 +90,30 @@ def _bio_indices(n_rays):
         "y_neg":         25,
         "near_e":        26,
         "near_w":        27,
-        "near_cr":       28,
-        "trig_sc":       30,
-        "on_countdown":  31,
-        "is_turn":       32,
-        "is_app":        33,
-        "sy_pp":         34,
-        "sy_pn":         35,
-        "sy_np":         36,
-        "sy_nn":         37,
-        "front_block_pos": 38,
-        "front_block_neg": 39,
-        "l_ev":          40,
-        "r_ev":          41,
-        "dleft":         42,
-        "dright":        43,
-        "evidence":      44,
-        "trig_pos":      45,
-        "trig_neg":      46,
-        "fs_pos":        47,
-        "fs_neg":        48,
+        "near_cr_e":     28,
+        "near_cr_w":     29,
+        "near_cr":       30,
+        "trig_sc":       31,
+        "on_countdown":  32,
+        "is_turn":       33,
+        "is_app":        34,
+        "sy_pp":         35,
+        "sy_pn":         36,
+        "sy_np":         37,
+        "sy_nn":         38,
+        "front_block_pos": 39,
+        "front_block_neg": 40,
+        "l_ev":          41,
+        "r_ev":          42,
+        "dleft":         43,
+        "dright":        44,
+        "evidence":      45,
+        "trig_pos":      46,
+        "trig_neg":      47,
+        "fs_pos":        48,
+        "fs_neg":        49,
     }
-    idx["near_cr_e"]     = 49
-    idx["near_cr_w"]     = 50
-    idx["xi_blue_start"] = 51
+    idx["xi_blue_start"] = 50
     idx["xi_blue_stop"]  = idx["xi_blue_start"] + n_rays
     idx["half"]          = n_rays // 2
     idx["bio_end"]       = idx["xi_blue_stop"]
