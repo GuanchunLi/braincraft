@@ -206,7 +206,9 @@ pos_y(t+1) = pos_y(t) + speed * cos_n(t)
 
 The sin-only trig pair keeps the activation library minimal while still
 covering the environment frame `dx = -speed·sin(phi)`, `dy = +speed·cos(phi)`
-used by the shortcut predicates.
+used by the shortcut predicates. Here `phi` is the controller's internal
+heading measured relative to north, i.e. `phi = 0` means north, `phi = -π/2`
+means east, and `phi = +π/2` means west.
 
 ### 5.3 Initial-heading correction
 
@@ -279,10 +281,9 @@ near_w(t+1) = bump((pos_x(t) - drift_offset) / (2*near_c_thr))
 `near_e` peaks when the bot is near `pos_x = -drift_offset` (west of
 centre, approaching the corridor from the east-bound leg); `near_w` is
 the mirror. Each is combined with a heading check into a 2-way AND.
-Heading is read from `sin_n`: in this file's convention `phi` tracks
-`dir_accum` starting at 0 with initial direction = north, so
-`sin_n = sin(phi)` equals `-1` when the bot is heading east and `+1`
-when heading west.
+Heading is read from `sin_n`: since the internal `phi` is measured relative
+to north, `sin_n = sin(phi)` equals `-1` when the bot is heading east and
+`+1` when heading west.
 
 ```text
 near_cr_e(t+1) = relu_tanh(ncr_gain * k_sharp * (near_e(t) - sin_n(t) - 1.5))
@@ -403,4 +404,8 @@ is the clipped copy of the previous step's output.
 python braincraft/env2_player_bio.py
 ```
 
-Expected final score: `~14.80 ± 0.1` (seed `12345`, 10 runs).
+Observed current output is:
+
+```text
+Final score (distance): 14.78 +/- 0.20
+```
