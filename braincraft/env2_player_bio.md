@@ -54,12 +54,14 @@ shortcut_turn      = -2.0
 near_c_thr         = 0.05
 drift_offset       = 0.175
 turn_steps         = 18
-approach_steps     = 45
-sc_total           = 63
+approach_steps     = 50
+sc_total           = 68
 color_evidence_thr = 2.0
 front_gain_mag     = 20°
 gate_c             = 1.0
 k_sharp            = 50.0
+ncr_gain           = 2.5
+near_cr_gain       = 2.5
 step_a             = 5°
 seed_window_k      = 6
 cal_gain           = 1 / 0.173
@@ -118,8 +120,7 @@ Hidden slots in allocator order:
 | 25        | `y_neg`           | `relu_tanh` | `pos_y < 0` sharp detector                         |
 | 26        | `near_e`          | `bump`      | east-shifted corridor bump                         |
 | 27        | `near_w`          | `bump`      | west-shifted corridor bump                         |
-| 28        | `near_cr`         | `relu_tanh` | corridor predicate (OR of `near_e`, `near_w`)      |
-| 29        | `front_clear`     | `relu_tanh` | no front-block predicate                           |
+| 28        | `near_cr`         | `relu_tanh` | corridor predicate (OR of `near_cr_e`, `near_cr_w`) |
 | 30        | `trig_sc`         | `relu_tanh` | shortcut trigger pulse                             |
 | 31        | `on_countdown`    | `relu_tanh` | `sc_countdown > 0.5`                               |
 | 32        | `is_turn`         | `relu_tanh` | turn-phase gate                                    |
@@ -139,7 +140,9 @@ Hidden slots in allocator order:
 | 46        | `trig_neg`        | `relu_tanh` | negative-evidence trigger                          |
 | 47        | `fs_pos`          | `relu_tanh` | latched positive front sign                        |
 | 48        | `fs_neg`          | `relu_tanh` | latched negative front sign                        |
-| 49..112   | `xi_blue[0..63]`  | `bump`      | per-ray blue detector (bump centred at colour `4`) |
+| 49        | `near_cr_e`       | `relu_tanh` | AND(`near_e`, heading east)                        |
+| 50        | `near_cr_w`       | `relu_tanh` | AND(`near_w`, heading west)                        |
+| 51..114   | `xi_blue[0..63]`  | `bump`      | per-ray blue detector (bump centred at colour `4`) |
 
 ## 5. Main circuits
 
@@ -274,26 +277,39 @@ near_w(t+1) = bump((pos_x(t) - drift_offset) / (2*near_c_thr))
 ```
 
 `near_e` peaks when the bot is near `pos_x = -drift_offset` (west of
-centre, heading east); `near_w` is the mirror. The corridor predicate is
-their OR, with a sharpened gate (`near_cr_gain = 2.5`) that widens the
-`trig_sc` AND margin so float-level roundoff in the bump detector cannot
-split the trigger across two steps:
+centre, approaching the corridor from the east-bound leg); `near_w` is
+the mirror. Each is combined with a heading check into a 2-way AND.
+Heading is read from `sin_n`: in this file's convention `phi` tracks
+`dir_accum` starting at 0 with initial direction = north, so
+`sin_n = sin(phi)` equals `-1` when the bot is heading east and `+1`
+when heading west.
 
 ```text
-near_cr(t+1) = relu_tanh(near_cr_gain * k_sharp * (near_e(t) + near_w(t) - 0.5))
+near_cr_e(t+1) = relu_tanh(ncr_gain * k_sharp * (near_e(t) - sin_n(t) - 1.5))
+near_cr_w(t+1) = relu_tanh(ncr_gain * k_sharp * (near_w(t) + sin_n(t) - 1.5))
 ```
 
-Front-clear predicate:
+The ±0.5 margin in each AND accepts headings within ~±60° of
+horizontal (the normal perimeter approach has `|sin_n| > 0.95` at the
+trigger moment) while rejecting perpendicular crossings of
+`pos_x = ±drift_offset` on later laps. The `ncr_gain = 2.5` sharpens
+the AND so near-threshold inputs don't fire the gate partially.
+
+The corridor predicate is the OR of the two heading-gated detectors,
+with a sharpened OR gate (`near_cr_gain = 2.5`) so that small roundoff
+in the inputs cannot produce an intermediate `near_cr`:
 
 ```text
-front_clear(t+1) = relu_tanh(k_sharp * (0.1 - front_block_pos(t) - front_block_neg(t)))
+near_cr(t+1) = relu_tanh(near_cr_gain * k_sharp * (near_cr_e(t) + near_cr_w(t) - 0.5))
 ```
 
-The shortcut trigger is a 3-way AND with two refractory terms:
+The shortcut trigger is a 2-way AND with two refractory terms, since
+position-at-corridor and heading-aligned-with-corridor are both
+already captured by `near_cr`:
 
 ```text
 trig_sc(t+1) = relu_tanh(
-    k_sharp * (reward_latch(t) + front_clear(t) + near_cr(t) - 2.5)
+    k_sharp * (reward_latch(t) + near_cr(t) - 1.5)
   - 10 * k_sharp * trig_sc(t)
   -      k_sharp * sc_countdown(t)
 )

@@ -27,7 +27,8 @@ The hidden pool packs one functional slot per neuron:
     14..19  energy-based reward circuit and shortcut actuators
     20..30  trig helpers, corridor predicates, shortcut trigger
     31..48  phase gates, quadrant ANDs, blue-evidence front-block
-    49..    per-ray blue-bump detectors
+    49..50  heading-gated corridor-entry detectors
+    51..    per-ray blue-bump detectors
 
 Constants use snake_case; local hidden-state aliases use UPPER_SNAKE.
 """
@@ -46,7 +47,7 @@ shortcut_turn  = -2.0      # saturated steering magnitude inside the turn
 near_c_thr     = 0.05      # half-width of the corridor bump detectors
 drift_offset   = 0.175     # pos_x offset where the shortcut is armed
 turn_steps     = 18        # length of the hard-turn phase
-approach_steps = 45        # length of the straight approach phase
+approach_steps = 50        # length of the straight approach phase
 sc_total       = turn_steps + approach_steps
 
 # ── Bio-specific constants ────────────────────────────────────────────
@@ -91,7 +92,6 @@ def _bio_indices(n_rays):
         "near_e":        26,
         "near_w":        27,
         "near_cr":       28,
-        "front_clear":   29,
         "trig_sc":       30,
         "on_countdown":  31,
         "is_turn":       32,
@@ -112,7 +112,9 @@ def _bio_indices(n_rays):
         "fs_pos":        47,
         "fs_neg":        48,
     }
-    idx["xi_blue_start"] = 49
+    idx["near_cr_e"]     = 49
+    idx["near_cr_w"]     = 50
+    idx["xi_blue_start"] = 51
     idx["xi_blue_stop"]  = idx["xi_blue_start"] + n_rays
     idx["half"]          = n_rays // 2
     idx["bio_end"]       = idx["xi_blue_stop"]
@@ -218,7 +220,6 @@ def bio_player():
     NEAR_E         = idx["near_e"]
     NEAR_W         = idx["near_w"]
     NEAR_CR        = idx["near_cr"]
-    FC             = idx["front_clear"]
     TSC            = idx["trig_sc"]
     ONC            = idx["on_countdown"]
     IST            = idx["is_turn"]
@@ -399,27 +400,39 @@ def bio_player():
     W[NEAR_W, POS_X]   = bump_scale
     Win[NEAR_W, bias_idx] = -drift_offset * bump_scale
 
-    # near_cr = near_e OR near_w. The gain widens the TSC margin so that
-    # float-level roundoff in the bump detector cannot split the shortcut
-    # trigger across two steps.
+    # Heading-gated corridor-entry detectors. sin_n tracks -cos(phi) here
+    # (dir_accum integrates phi − π/2, so the neuron literally named sin_n
+    # outputs sin of that shifted angle = -cos(phi)); sin_n ≈ -1 is east,
+    # sin_n ≈ +1 is west. The AND threshold at ±0.5 accepts headings
+    # within ~±60° of horizontal — normal perimeter approaches have
+    # |sin_n| > 0.95 at the trigger moment, and perpendicular passes
+    # (heading north/south over pos_x = ±drift_offset on a later lap)
+    # are rejected cleanly.
+    ncr_gain = 2.5
+    NEAR_CR_E = idx["near_cr_e"]
+    NEAR_CR_W = idx["near_cr_w"]
+    W[NEAR_CR_E, NEAR_E]      =  ncr_gain * k_sharp
+    W[NEAR_CR_E, SIN_N]       = -ncr_gain * k_sharp    # sin_n ~= -1 => east
+    Win[NEAR_CR_E, bias_idx]  = -ncr_gain * k_sharp * 1.5
+    W[NEAR_CR_W, NEAR_W]      =  ncr_gain * k_sharp
+    W[NEAR_CR_W, SIN_N]       =  ncr_gain * k_sharp    # sin_n ~= +1 => west
+    Win[NEAR_CR_W, bias_idx]  = -ncr_gain * k_sharp * 1.5
+
+    # near_cr = near_cr_e OR near_cr_w. The 2.5x gain keeps the OR-gate
+    # transition sharp across BLAS-level roundoff in the inputs.
     near_cr_gain = 2.5
-    W[NEAR_CR, NEAR_E] = near_cr_gain * k_sharp
-    W[NEAR_CR, NEAR_W] = near_cr_gain * k_sharp
+    W[NEAR_CR, NEAR_CR_E] = near_cr_gain * k_sharp
+    W[NEAR_CR, NEAR_CR_W] = near_cr_gain * k_sharp
     Win[NEAR_CR, bias_idx] = -0.5 * near_cr_gain * k_sharp
 
-    # front_clear: front_block_pos + front_block_neg < 0.1.
-    W[FC, FBP] = -k_sharp
-    W[FC, FBN] = -k_sharp
-    Win[FC, bias_idx] =  k_sharp * 0.1
-
-    # ── Shortcut trigger (3-way AND with refractory) ──────────────────
-    # trig_sc fires when reward has been seen, the front is clear, and
-    # pos_x is near one of the corridor offsets. Two refractory terms
-    # prevent re-triggering during the countdown.
+    # ── Shortcut trigger (2-way AND with refractory) ──────────────────
+    # trig_sc fires when reward has been seen AND the heading-gated
+    # corridor-entry neuron fires. near_cr_e/near_cr_w already encode
+    # "position at corridor entry + heading toward the clear corridor
+    # axis", which is a sufficient precondition on its own.
     W[TSC, REWARD_LATCH] = k_sharp
-    W[TSC, FC]           = k_sharp
     W[TSC, NEAR_CR]      = k_sharp
-    Win[TSC, bias_idx]   = -k_sharp * 2.5
+    Win[TSC, bias_idx]   = -k_sharp * 1.5
     W[TSC, TSC]          = -k_sharp * 10     # self-refractory
     W[TSC, SC_COUNTDOWN] = -k_sharp           # blocked while countdown runs
 
