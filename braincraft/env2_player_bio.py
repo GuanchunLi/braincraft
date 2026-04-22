@@ -411,10 +411,22 @@ def bio_player():
     W[NEAR_W, POS_X]   = bump_scale
     Win[NEAR_W, bias_idx] = -drift_offset * bump_scale
 
-    # near_cr = near_e OR near_w.
-    W[NEAR_CR, NEAR_E] = k_sharp
-    W[NEAR_CR, NEAR_W] = k_sharp
-    Win[NEAR_CR, bias_idx] = -0.5 * k_sharp
+    # near_cr = near_e OR near_w. The OR gate uses a 2.5x-sharper sigmoid
+    # to widen the TSC margin against BLAS accumulation drift. Under
+    # numpy 2.x, ULP-level matmul roundoff pushes NEAR_E to ~0.511 on the
+    # fifth corridor lap of seed 86398 (vs ~0.522 on numpy 1.26); the
+    # default k_sharp gate then returns NEAR_CR = tanh(0.55) = 0.50 —
+    # exactly at TSC's 3.5 AND threshold — which splits TSC firing across
+    # two steps and truncates the shortcut countdown. At gain 2.5 the
+    # same NEAR_E = 0.511 drives NEAR_CR = tanh(1.375) = 0.88, giving
+    # TSC a 0.38-unit margin that saturates the fire to a single step.
+    # Higher gains (>=4) overshoot and cause an earlier premature fire
+    # on other outer seeds (e.g. seed 101), so 2.5 is the middle of the
+    # safe window [2, 3].
+    near_cr_gain = 2.5
+    W[NEAR_CR, NEAR_E] = near_cr_gain * k_sharp
+    W[NEAR_CR, NEAR_W] = near_cr_gain * k_sharp
+    Win[NEAR_CR, bias_idx] = -0.5 * near_cr_gain * k_sharp
 
     # heading_horiz: |sin(phi)|^2 < sin_horiz_thr^2 (implemented via sin_sq).
     W[HH, SIN_SQ] = -k_sharp / (sin_horiz_thr ** 2)
