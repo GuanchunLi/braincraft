@@ -22,7 +22,7 @@ from environment_1 import Environment
 # Add new entries here to expose them on the command line.
 # Default models to plot when no --models flag is passed on the CLI.
 # Edit this list to change which models render by default.
-DEFAULT_MODELS = ["reflex2"]
+DEFAULT_MODELS = ["bio"]
 
 # Default seeds (one column per seed).
 DEFAULT_SEEDS = [12345, 1, 2, 7]
@@ -41,6 +41,7 @@ PLAYERS = {
     "switcher_alt":       ("env1_player_switcher_alt",       "switcher_player"),
     "evolution":          ("env1_player_evolution",          "evolutionary_player"),
     "ensemble_v3_metric": ("env1_player_ensemble_v3_metric", "ensemble_v3_metric_env1_player"),
+    "bio": ("env1_player_bio", "bio_player"),
 }
 
 
