@@ -14,6 +14,11 @@ carried by the connectivity matrices. The update is
 
 with identity readout g(x) = x.
 
+Env2 adds a per-ray colour channel, so the input vector is
+
+    I(t) = [prox[0..63](t), colour[0..63](t), hit(t), energy(t), 1]
+                                                       (2p + 3 = 131 cols)
+
 The hidden pool packs one functional slot per neuron:
 
     0..4    reflex features (hit, proximity, safety)
@@ -126,7 +131,7 @@ def make_activation(a, idx):
 
         identity  : linear slots (integrators, accumulators, sums)
         sin       : trig helpers (sin_n, cos_n)
-        square    : sin_sq (holds cos(phi)^2; name kept for brevity)
+        square    : sin_sq (holds cos(phi)^2)
         relu      : energy_ramp, sc_countdown
         bump      : max(0, 1 - 4 z^2) — corridor detectors and blue rays
         clip_a    : dtheta, clipped to ±step_a
@@ -283,7 +288,6 @@ def bio_player():
     Wout[0, SAFE_RIGHT]     = safety_gain_right
     Wout[0, SHORTCUT_STEER] = 1.0
     Wout[0, INIT_IMPULSE]   = 1.0
-    # Wout[0, FBP/FBN] are set below after the front-block wiring.
 
     # ── Heading, trig, and position accumulators ──────────────────────
     # dir_accum integrates every applied dtheta. phi(t) is reconstructed
@@ -336,9 +340,7 @@ def bio_player():
 
     # ── Reward circuit ────────────────────────────────────────────────
     # energy_ramp holds energy(t-1). reward_pulse detects a rising edge
-    # in energy(t) - energy(t-1) once seeded_flag arms it (which happens
-    # when the initial correction window closes; the first energy event
-    # cannot occur before then, so no armed_latch neuron is required).
+    # in energy(t) - energy(t-1) once seeded_flag arms it.
     pulse_gain = 500.0
     pulse_thr  = 0.2
     arm_gate   = 1000.0
@@ -411,18 +413,9 @@ def bio_player():
     W[NEAR_W, POS_X]   = bump_scale
     Win[NEAR_W, bias_idx] = -drift_offset * bump_scale
 
-    # near_cr = near_e OR near_w. The OR gate uses a 2.5x-sharper sigmoid
-    # to widen the TSC margin against BLAS accumulation drift. Under
-    # numpy 2.x, ULP-level matmul roundoff pushes NEAR_E to ~0.511 on the
-    # fifth corridor lap of seed 86398 (vs ~0.522 on numpy 1.26); the
-    # default k_sharp gate then returns NEAR_CR = tanh(0.55) = 0.50 —
-    # exactly at TSC's 3.5 AND threshold — which splits TSC firing across
-    # two steps and truncates the shortcut countdown. At gain 2.5 the
-    # same NEAR_E = 0.511 drives NEAR_CR = tanh(1.375) = 0.88, giving
-    # TSC a 0.38-unit margin that saturates the fire to a single step.
-    # Higher gains (>=4) overshoot and cause an earlier premature fire
-    # on other outer seeds (e.g. seed 101), so 2.5 is the middle of the
-    # safe window [2, 3].
+    # near_cr = near_e OR near_w. The gain widens the TSC margin so that
+    # float-level roundoff in the bump detector cannot split the shortcut
+    # trigger across two steps.
     near_cr_gain = 2.5
     W[NEAR_CR, NEAR_E] = near_cr_gain * k_sharp
     W[NEAR_CR, NEAR_W] = near_cr_gain * k_sharp

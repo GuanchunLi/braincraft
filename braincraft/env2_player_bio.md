@@ -280,22 +280,13 @@ near_w(t+1) = bump((pos_x(t) - drift_offset) / (2*near_c_thr))
 
 `near_e` peaks when the bot is near `pos_x = -drift_offset` (west of
 centre, heading east); `near_w` is the mirror. The corridor predicate is
-their OR, with a 2.5× sharper gate (`near_cr_gain = 2.5`) to absorb
-BLAS-roundoff drift under numpy 2.x:
+their OR, with a sharpened gate (`near_cr_gain = 2.5`) that widens the
+`trig_sc` AND margin so float-level roundoff in the bump detector cannot
+split the trigger across two steps:
 
 ```text
 near_cr(t+1) = relu_tanh(near_cr_gain * k_sharp * (near_e(t) + near_w(t) - 0.5))
 ```
-
-The extra gain matters because numpy 2.x reorders matmul accumulation
-relative to numpy 1.26, leaving `near_e ≈ 0.511` at the fifth corridor
-lap of seed `86398` (vs `≈ 0.522` on numpy 1.26). With the default
-`k_sharp` gate, `tanh(50·0.011) = 0.50` lands exactly at `trig_sc`'s
-`3.5` AND threshold and splits the trigger across two steps, truncating
-the shortcut countdown. Scaling the preactivation by `near_cr_gain`
-keeps `near_cr` saturated for every outer seed tested. Gains in
-`[2.0, 3.0]` all pass the 10-seed robustness sweep; `≥ 4` overshoots
-and causes premature triggers on other seeds (e.g. `101`).
 
 Heading and front-clear predicates:
 
