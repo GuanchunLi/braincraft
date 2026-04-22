@@ -45,14 +45,12 @@ preactivation `z_i(t)`:
 | `relu`      | `max(0, z)`                   | `energy_ramp`, `sc_countdown`                                                                                     |
 | `clip_a`    | `clip(z, -step_a, +step_a)`   | `dtheta`                                                                                                          |
 | `sin`       | `sin(z)`                      | `sin_n`, `cos_n`                                                                                                  |
-| `square`    | `z^2`                         | `sin_sq`                                                                                                          |
 | `bump`      | `max(0, 1 - 4 z^2)`           | `near_e`, `near_w`, `xi_blue[0..63]`                                                                              |
 
 Module constants:
 
 ```text
 shortcut_turn      = -2.0
-sin_horiz_thr      = 0.35
 near_c_thr         = 0.05
 drift_offset       = 0.175
 turn_steps         = 18
@@ -114,36 +112,34 @@ Hidden slots in allocator order:
 | 19        | `init_impulse`    | `identity`  | initial-correction steering actuator               |
 | 20        | `sin_n`           | `sin`       | `sin(phi)`                                         |
 | 21        | `cos_n`           | `sin`       | `cos(phi)` (via `sin(phi + π/2)`)                  |
-| 22        | `sin_sq`          | `square`    | `cos(phi)^2` magnitude                             |
-| 23        | `sin_pos`         | `relu_tanh` | `sin(phi) > 0` sharp detector                      |
-| 24        | `sin_neg`         | `relu_tanh` | `sin(phi) < 0` sharp detector                      |
-| 25        | `y_pos`           | `relu_tanh` | `pos_y > 0` sharp detector                         |
-| 26        | `y_neg`           | `relu_tanh` | `pos_y < 0` sharp detector                         |
-| 27        | `near_e`          | `bump`      | east-shifted corridor bump                         |
-| 28        | `near_w`          | `bump`      | west-shifted corridor bump                         |
-| 29        | `near_cr`         | `relu_tanh` | corridor predicate (OR of `near_e`, `near_w`)      |
-| 30        | `heading_horiz`   | `relu_tanh` | near-horizontal heading predicate                  |
-| 31        | `front_clear`     | `relu_tanh` | no front-block predicate                           |
-| 32        | `trig_sc`         | `relu_tanh` | shortcut trigger pulse                             |
-| 33        | `on_countdown`    | `relu_tanh` | `sc_countdown > 0.5`                               |
-| 34        | `is_turn`         | `relu_tanh` | turn-phase gate                                    |
-| 35        | `is_app`          | `relu_tanh` | approach-phase gate                                |
-| 36        | `sy_pp`           | `relu_tanh` | AND(`sin_pos`, `y_pos`, `is_turn`)                 |
-| 37        | `sy_pn`           | `relu_tanh` | AND(`sin_pos`, `y_neg`, `is_turn`)                 |
-| 38        | `sy_np`           | `relu_tanh` | AND(`sin_neg`, `y_pos`, `is_turn`)                 |
-| 39        | `sy_nn`           | `relu_tanh` | AND(`sin_neg`, `y_neg`, `is_turn`)                 |
-| 40        | `front_block_pos` | `relu_tanh` | front-block for positive front sign                |
-| 41        | `front_block_neg` | `relu_tanh` | front-block for negative front sign                |
-| 42        | `l_ev`            | `identity`  | left-half blue evidence sum                        |
-| 43        | `r_ev`            | `identity`  | right-half blue evidence sum                       |
-| 44        | `dleft`           | `relu_tanh` | left-dominance pulse                               |
-| 45        | `dright`          | `relu_tanh` | right-dominance pulse                              |
-| 46        | `evidence`        | `identity`  | signed colour-evidence accumulator                 |
-| 47        | `trig_pos`        | `relu_tanh` | positive-evidence trigger                          |
-| 48        | `trig_neg`        | `relu_tanh` | negative-evidence trigger                          |
-| 49        | `fs_pos`          | `relu_tanh` | latched positive front sign                        |
-| 50        | `fs_neg`          | `relu_tanh` | latched negative front sign                        |
-| 51..114   | `xi_blue[0..63]`  | `bump`      | per-ray blue detector (bump centred at colour `4`) |
+| 22        | `sin_pos`         | `relu_tanh` | `sin(phi) > 0` sharp detector                      |
+| 23        | `sin_neg`         | `relu_tanh` | `sin(phi) < 0` sharp detector                      |
+| 24        | `y_pos`           | `relu_tanh` | `pos_y > 0` sharp detector                         |
+| 25        | `y_neg`           | `relu_tanh` | `pos_y < 0` sharp detector                         |
+| 26        | `near_e`          | `bump`      | east-shifted corridor bump                         |
+| 27        | `near_w`          | `bump`      | west-shifted corridor bump                         |
+| 28        | `near_cr`         | `relu_tanh` | corridor predicate (OR of `near_e`, `near_w`)      |
+| 29        | `front_clear`     | `relu_tanh` | no front-block predicate                           |
+| 30        | `trig_sc`         | `relu_tanh` | shortcut trigger pulse                             |
+| 31        | `on_countdown`    | `relu_tanh` | `sc_countdown > 0.5`                               |
+| 32        | `is_turn`         | `relu_tanh` | turn-phase gate                                    |
+| 33        | `is_app`          | `relu_tanh` | approach-phase gate                                |
+| 34        | `sy_pp`           | `relu_tanh` | AND(`sin_pos`, `y_pos`, `is_turn`)                 |
+| 35        | `sy_pn`           | `relu_tanh` | AND(`sin_pos`, `y_neg`, `is_turn`)                 |
+| 36        | `sy_np`           | `relu_tanh` | AND(`sin_neg`, `y_pos`, `is_turn`)                 |
+| 37        | `sy_nn`           | `relu_tanh` | AND(`sin_neg`, `y_neg`, `is_turn`)                 |
+| 38        | `front_block_pos` | `relu_tanh` | front-block for positive front sign                |
+| 39        | `front_block_neg` | `relu_tanh` | front-block for negative front sign                |
+| 40        | `l_ev`            | `identity`  | left-half blue evidence sum                        |
+| 41        | `r_ev`            | `identity`  | right-half blue evidence sum                       |
+| 42        | `dleft`           | `relu_tanh` | left-dominance pulse                               |
+| 43        | `dright`          | `relu_tanh` | right-dominance pulse                              |
+| 44        | `evidence`        | `identity`  | signed colour-evidence accumulator                 |
+| 45        | `trig_pos`        | `relu_tanh` | positive-evidence trigger                          |
+| 46        | `trig_neg`        | `relu_tanh` | negative-evidence trigger                          |
+| 47        | `fs_pos`          | `relu_tanh` | latched positive front sign                        |
+| 48        | `fs_neg`          | `relu_tanh` | latched negative front sign                        |
+| 49..112   | `xi_blue[0..63]`  | `bump`      | per-ray blue detector (bump centred at colour `4`) |
 
 ## 5. Main circuits
 
@@ -200,7 +196,6 @@ dir_accum(t+1) = dir_accum(t) + dtheta(t)
 phi(t)      = dir_accum(t) + head_corr(t) + dtheta(t)
 sin_n(t+1)  = sin(phi(t))
 cos_n(t+1)  = sin(phi(t) + π/2)       # = cos(phi(t))
-sin_sq(t+1) = cos_n(t)^2
 
 pos_x(t+1) = pos_x(t) - speed * sin_n(t)
 pos_y(t+1) = pos_y(t) + speed * cos_n(t)
@@ -288,18 +283,17 @@ split the trigger across two steps:
 near_cr(t+1) = relu_tanh(near_cr_gain * k_sharp * (near_e(t) + near_w(t) - 0.5))
 ```
 
-Heading and front-clear predicates:
+Front-clear predicate:
 
 ```text
-heading_horiz(t+1) = relu_tanh(k_sharp * (1 - sin_sq(t) / sin_horiz_thr^2))
-front_clear(t+1)   = relu_tanh(k_sharp * (0.1 - front_block_pos(t) - front_block_neg(t)))
+front_clear(t+1) = relu_tanh(k_sharp * (0.1 - front_block_pos(t) - front_block_neg(t)))
 ```
 
-The shortcut trigger is a 4-way AND with two refractory terms:
+The shortcut trigger is a 3-way AND with two refractory terms:
 
 ```text
 trig_sc(t+1) = relu_tanh(
-    k_sharp * (reward_latch(t) + heading_horiz(t) + front_clear(t) + near_cr(t) - 3.5)
+    k_sharp * (reward_latch(t) + front_clear(t) + near_cr(t) - 2.5)
   - 10 * k_sharp * trig_sc(t)
   -      k_sharp * sc_countdown(t)
 )
@@ -393,4 +387,4 @@ is the clipped copy of the previous step's output.
 python braincraft/env2_player_bio.py
 ```
 
-Expected final score: `~14.71 ± 0.1` (seed `12345`, 10 runs).
+Expected final score: `~14.80 ± 0.1` (seed `12345`, 10 runs).

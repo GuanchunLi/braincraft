@@ -25,9 +25,9 @@ The hidden pool packs one functional slot per neuron:
     5..8    dtheta, integrated heading, position accumulators
     9..13   initial-heading correction latch
     14..19  energy-based reward circuit and shortcut actuators
-    20..32  trig helpers, corridor predicates, shortcut trigger
-    33..50  phase gates, quadrant ANDs, blue-evidence front-block
-    51..    per-ray blue-bump detectors
+    20..30  trig helpers, corridor predicates, shortcut trigger
+    31..48  phase gates, quadrant ANDs, blue-evidence front-block
+    49..    per-ray blue-bump detectors
 
 Constants use snake_case; local hidden-state aliases use UPPER_SNAKE.
 """
@@ -43,7 +43,6 @@ from environment_2 import Environment
 
 # ── Shortcut circuit parameters ───────────────────────────────────────
 shortcut_turn  = -2.0      # saturated steering magnitude inside the turn
-sin_horiz_thr  = 0.35      # |sin(phi)| threshold for "near-horizontal" heading
 near_c_thr     = 0.05      # half-width of the corridor bump detectors
 drift_offset   = 0.175     # pos_x offset where the shortcut is armed
 turn_steps     = 18        # length of the hard-turn phase
@@ -85,37 +84,35 @@ def _bio_indices(n_rays):
         "init_impulse":  19,
         "sin_n":         20,
         "cos_n":         21,
-        "sin_sq":        22,
-        "sin_pos":       23,
-        "sin_neg":       24,
-        "y_pos":         25,
-        "y_neg":         26,
-        "near_e":        27,
-        "near_w":        28,
-        "near_cr":       29,
-        "heading_horiz": 30,
-        "front_clear":   31,
-        "trig_sc":       32,
-        "on_countdown":  33,
-        "is_turn":       34,
-        "is_app":        35,
-        "sy_pp":         36,
-        "sy_pn":         37,
-        "sy_np":         38,
-        "sy_nn":         39,
-        "front_block_pos": 40,
-        "front_block_neg": 41,
-        "l_ev":          42,
-        "r_ev":          43,
-        "dleft":         44,
-        "dright":        45,
-        "evidence":      46,
-        "trig_pos":      47,
-        "trig_neg":      48,
-        "fs_pos":        49,
-        "fs_neg":        50,
+        "sin_pos":       22,
+        "sin_neg":       23,
+        "y_pos":         24,
+        "y_neg":         25,
+        "near_e":        26,
+        "near_w":        27,
+        "near_cr":       28,
+        "front_clear":   29,
+        "trig_sc":       30,
+        "on_countdown":  31,
+        "is_turn":       32,
+        "is_app":        33,
+        "sy_pp":         34,
+        "sy_pn":         35,
+        "sy_np":         36,
+        "sy_nn":         37,
+        "front_block_pos": 38,
+        "front_block_neg": 39,
+        "l_ev":          40,
+        "r_ev":          41,
+        "dleft":         42,
+        "dright":        43,
+        "evidence":      44,
+        "trig_pos":      45,
+        "trig_neg":      46,
+        "fs_pos":        47,
+        "fs_neg":        48,
     }
-    idx["xi_blue_start"] = 51
+    idx["xi_blue_start"] = 49
     idx["xi_blue_stop"]  = idx["xi_blue_start"] + n_rays
     idx["half"]          = n_rays // 2
     idx["bio_end"]       = idx["xi_blue_stop"]
@@ -131,7 +128,6 @@ def make_activation(a, idx):
 
         identity  : linear slots (integrators, accumulators, sums)
         sin       : trig helpers (sin_n, cos_n)
-        square    : sin_sq (holds cos(phi)^2)
         relu      : energy_ramp, sc_countdown
         bump      : max(0, 1 - 4 z^2) — corridor detectors and blue rays
         clip_a    : dtheta, clipped to ±step_a
@@ -144,14 +140,12 @@ def make_activation(a, idx):
         idx["step_counter"],
     ]
     sin_list    = [idx["sin_n"], idx["cos_n"]]
-    square_list = [idx["sin_sq"]]
     relu_list   = [idx["energy_ramp"], idx["sc_countdown"]]
     bump_list   = [idx["near_e"], idx["near_w"]]
     bump_list.extend(range(idx["xi_blue_start"], idx["xi_blue_stop"]))
 
     id_arr     = np.array(sorted(set(id_list)),     dtype=int)
     sin_arr    = np.array(sorted(set(sin_list)),    dtype=int)
-    square_arr = np.array(sorted(set(square_list)), dtype=int)
     relu_arr   = np.array(sorted(set(relu_list)),   dtype=int)
     bump_arr   = np.array(sorted(set(bump_list)),   dtype=int)
 
@@ -161,8 +155,6 @@ def make_activation(a, idx):
             out[id_arr, 0] = x[id_arr, 0]
         if sin_arr.size:
             out[sin_arr, 0] = np.sin(x[sin_arr, 0])
-        if square_arr.size:
-            out[square_arr, 0] = x[square_arr, 0] ** 2
         if relu_arr.size:
             out[relu_arr, 0] = np.maximum(0.0, x[relu_arr, 0])
         if bump_arr.size:
@@ -219,7 +211,6 @@ def bio_player():
     INIT_IMPULSE   = idx["init_impulse"]
     SIN_N          = idx["sin_n"]
     COS_N          = idx["cos_n"]
-    SIN_SQ         = idx["sin_sq"]
     SIN_POS        = idx["sin_pos"]
     SIN_NEG        = idx["sin_neg"]
     Y_POS          = idx["y_pos"]
@@ -227,7 +218,6 @@ def bio_player():
     NEAR_E         = idx["near_e"]
     NEAR_W         = idx["near_w"]
     NEAR_CR        = idx["near_cr"]
-    HH             = idx["heading_horiz"]
     FC             = idx["front_clear"]
     TSC            = idx["trig_sc"]
     ONC            = idx["on_countdown"]
@@ -391,10 +381,6 @@ def bio_player():
         W[trig_i, DTHETA]    = 1.0
     Win[COS_N, bias_idx] = np.pi / 2
 
-    # sin_sq holds cos(phi)^2 and is used by heading_horiz as a sharp
-    # "near-horizontal" test against sin_horiz_thr.
-    W[SIN_SQ, COS_N] = 1.0
-
     # Sharp sign detectors on sin(phi) and pos_y, used by the quadrant ANDs.
     W[SIN_POS, SIN_N] =  k_sharp
     W[SIN_NEG, SIN_N] = -k_sharp
@@ -421,24 +407,19 @@ def bio_player():
     W[NEAR_CR, NEAR_W] = near_cr_gain * k_sharp
     Win[NEAR_CR, bias_idx] = -0.5 * near_cr_gain * k_sharp
 
-    # heading_horiz: |sin(phi)|^2 < sin_horiz_thr^2 (implemented via sin_sq).
-    W[HH, SIN_SQ] = -k_sharp / (sin_horiz_thr ** 2)
-    Win[HH, bias_idx] =  k_sharp
-
     # front_clear: front_block_pos + front_block_neg < 0.1.
     W[FC, FBP] = -k_sharp
     W[FC, FBN] = -k_sharp
     Win[FC, bias_idx] =  k_sharp * 0.1
 
-    # ── Shortcut trigger (4-way AND with refractory) ──────────────────
-    # trig_sc fires when reward has been seen, heading is near-horizontal,
-    # the front is clear, and pos_x is near one of the corridor offsets.
-    # Two refractory terms prevent re-triggering during the countdown.
+    # ── Shortcut trigger (3-way AND with refractory) ──────────────────
+    # trig_sc fires when reward has been seen, the front is clear, and
+    # pos_x is near one of the corridor offsets. Two refractory terms
+    # prevent re-triggering during the countdown.
     W[TSC, REWARD_LATCH] = k_sharp
-    W[TSC, HH]           = k_sharp
     W[TSC, FC]           = k_sharp
     W[TSC, NEAR_CR]      = k_sharp
-    Win[TSC, bias_idx]   = -k_sharp * 3.5
+    Win[TSC, bias_idx]   = -k_sharp * 2.5
     W[TSC, TSC]          = -k_sharp * 10     # self-refractory
     W[TSC, SC_COUNTDOWN] = -k_sharp           # blocked while countdown runs
 
