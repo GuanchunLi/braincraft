@@ -22,15 +22,18 @@ The hidden pool packs one functional slot per neuron:
 
     0..4    reflex features (hit, proximity, safety)
     5..8    dtheta, integrated heading, position accumulators
-    9..13   initial-heading correction latch
-    14..19  energy-based reward circuit and shortcut actuators
-    20..31  trig helpers, corridor predicates, shortcut trigger
-    32..39  phase gates, quadrant ANDs, unsigned front-block
+    9..15   reward arm gate, reward circuit, shortcut countdown/steer
+    16..27  trig helpers, corridor predicates, shortcut trigger
+    28..35  phase gates, quadrant ANDs, unsigned front-block
 
-This is the env1 adaptation of env2_player_bio.py: the colour-evidence
-circuit is dropped, the two signed front-block channels collapse to a
-single unsigned front_block (fixed-direction escape turn), and the
-input columns are re-indexed to the shorter env1 layout.
+This is the env1 adaptation of env2_player_bio.py. Relative to env2:
+  - the colour-evidence circuit is dropped (no colour input),
+  - the signed front_block_pos/_neg pair collapses to one unsigned
+    front_block with a fixed-direction escape turn, and
+  - the initial-heading correction circuit is dropped — env1 is robust
+    to the ±5° start perturbation because the reflex wall-follower
+    re-aligns the bot before pos_x drift reaches the shortcut corridor
+    bumps (half-width near_c_thr = 0.05).
 
 Constants use snake_case; local hidden-state aliases use UPPER_SNAKE.
 """
@@ -56,7 +59,7 @@ sc_total       = turn_steps + approach_steps
 front_gain_mag     = np.radians(20.0)
 k_sharp            = 50.0            # logistic-like gain for AND/OR/latch gates
 step_a             = np.radians(5.0) # actuator clip (±5°)
-seed_window_k      = 6               # initial-heading correction window length
+arm_window_k       = 6               # steps before reward detection is armed
 
 
 # ── Neuron index layout ───────────────────────────────────────────────
@@ -72,39 +75,35 @@ def _bio_indices():
         "dir_accum":      6,
         "pos_x":          7,
         "pos_y":          8,
-        "head_corr":      9,
-        "seeded_flag":   10,
-        "step_counter":  11,
-        "seed_pos":      12,
-        "seed_neg":      13,
-        "energy_ramp":   14,
-        "reward_pulse":  15,
-        "reward_latch":  16,
-        "sc_countdown":  17,
-        "shortcut_steer":18,
-        "init_impulse":  19,
-        "sin_n":         20,
-        "cos_n":         21,
-        "sin_pos":       22,
-        "sin_neg":       23,
-        "y_pos":         24,
-        "y_neg":         25,
-        "near_e":        26,
-        "near_w":        27,
-        "near_cr_e":     28,
-        "near_cr_w":     29,
-        "near_cr":       30,
-        "trig_sc":       31,
-        "on_countdown":  32,
-        "is_turn":       33,
-        "is_app":        34,
-        "sy_pp":         35,
-        "sy_pn":         36,
-        "sy_np":         37,
-        "sy_nn":         38,
-        "front_block":   39,
+        "step_counter":   9,
+        "armed_flag":    10,
+        "energy_ramp":   11,
+        "reward_pulse":  12,
+        "reward_latch":  13,
+        "sc_countdown":  14,
+        "shortcut_steer":15,
+        "sin_n":         16,
+        "cos_n":         17,
+        "sin_pos":       18,
+        "sin_neg":       19,
+        "y_pos":         20,
+        "y_neg":         21,
+        "near_e":        22,
+        "near_w":        23,
+        "near_cr_e":     24,
+        "near_cr_w":     25,
+        "near_cr":       26,
+        "trig_sc":       27,
+        "on_countdown":  28,
+        "is_turn":       29,
+        "is_app":        30,
+        "sy_pp":         31,
+        "sy_pn":         32,
+        "sy_np":         33,
+        "sy_nn":         34,
+        "front_block":   35,
     }
-    idx["bio_end"] = 40
+    idx["bio_end"] = 36
     return idx
 
 
@@ -123,8 +122,8 @@ def make_activation(a, idx):
         default   : max(0, tanh(z)) — sparse threshold / latch gates
     """
     id_list = [
-        idx["dir_accum"], idx["pos_x"], idx["pos_y"], idx["head_corr"],
-        idx["shortcut_steer"], idx["init_impulse"],
+        idx["dir_accum"], idx["pos_x"], idx["pos_y"],
+        idx["shortcut_steer"],
         idx["step_counter"],
     ]
     sin_list    = [idx["sin_n"], idx["cos_n"]]
@@ -186,15 +185,13 @@ def bio_player():
     DIR_ACCUM      = idx["dir_accum"]
     POS_X          = idx["pos_x"]
     POS_Y          = idx["pos_y"]
-    HEAD_CORR      = idx["head_corr"]
-    SEEDED_FLAG    = idx["seeded_flag"]
     STEP_COUNTER   = idx["step_counter"]
+    ARMED_FLAG     = idx["armed_flag"]
     ENERGY_RAMP    = idx["energy_ramp"]
     REWARD_PULSE   = idx["reward_pulse"]
     REWARD_LATCH   = idx["reward_latch"]
     SC_COUNTDOWN   = idx["sc_countdown"]
     SHORTCUT_STEER = idx["shortcut_steer"]
-    INIT_IMPULSE   = idx["init_impulse"]
     SIN_N          = idx["sin_n"]
     COS_N          = idx["cos_n"]
     SIN_POS        = idx["sin_pos"]
@@ -208,8 +205,6 @@ def bio_player():
     ONC            = idx["on_countdown"]
     IST            = idx["is_turn"]
     ISA            = idx["is_app"]
-    SEEDP          = idx["seed_pos"]
-    SEEDN          = idx["seed_neg"]
     SY_PP          = idx["sy_pp"]
     SY_PN          = idx["sy_pn"]
     SY_NP          = idx["sy_np"]
@@ -242,7 +237,7 @@ def bio_player():
     Win[SAFE_RIGHT,  bias_idx]       = safety_target
 
     # Silence reflex features during the shortcut approach so the output
-    # reduces to the front-block + shortcut-steer + initial-impulse terms.
+    # reduces to the front-block + shortcut-steer terms.
     for reflex_idx in (HIT_FEAT, PROX_LEFT, PROX_RIGHT, SAFE_LEFT, SAFE_RIGHT):
         W[reflex_idx, ISA] = -k_sharp
 
@@ -252,13 +247,12 @@ def bio_player():
     Wout[0, SAFE_LEFT]      = safety_gain_left
     Wout[0, SAFE_RIGHT]     = safety_gain_right
     Wout[0, SHORTCUT_STEER] = 1.0
-    Wout[0, INIT_IMPULSE]   = 1.0
 
     # ── Heading, trig, and position accumulators ──────────────────────
     # dir_accum integrates every applied dtheta. phi(t) is reconstructed
-    # inside the trig neurons from dir_accum + head_corr + dtheta (their
-    # three incoming weights of 1). W[DTHETA, :] is filled at the end
-    # so that z_dtheta(t+1) = Wout @ X(t) = O(t).
+    # inside the trig neurons from dir_accum + dtheta (their two incoming
+    # weights of 1). W[DTHETA, :] is filled at the end so that
+    # z_dtheta(t+1) = Wout @ X(t) = O(t).
     W[DIR_ACCUM, DIR_ACCUM] = 1.0
     W[DIR_ACCUM, DTHETA]    = 1.0
 
@@ -268,44 +262,21 @@ def bio_player():
     W[POS_Y, POS_Y] = 1.0
     W[POS_Y, COS_N] = speed
 
-    # ── Initial-heading correction latch ──────────────────────────────
-    # step_counter is a plain identity counter (= t). seeded_flag is a
-    # sharp threshold against it: 0 for t = 0..seed_window_k - 1, then
-    # saturates to 1. seed_pos / seed_neg read seeded_flag(t), so they
-    # fire for exactly seed_window_k consecutive steps (t = 1..K).
-    # head_corr integrates their difference across that window, driving
-    # the residual left/right depth asymmetry toward zero in closed loop.
-    cal_gain = 1.0 / 0.173
-
+    # ── Reward arm gate ───────────────────────────────────────────────
+    # step_counter is an identity counter (= t). armed_flag is a sharp
+    # threshold that is 0 for t < arm_window_k and saturates to 1 after.
+    # It holds the reward detector off during the first few steps; env1
+    # has no way to reach a source inside that window, so no
+    # initial-heading correction is needed on top of it.
     W[STEP_COUNTER, STEP_COUNTER] = 1.0
     Win[STEP_COUNTER, bias_idx]   = 1.0
 
-    W[SEEDED_FLAG, STEP_COUNTER]  = k_sharp
-    Win[SEEDED_FLAG, bias_idx]    = -k_sharp * (float(seed_window_k) - 1.5)
-
-    # SEED_POS/NEG: signed (R - L) depth asymmetry, gated off once
-    # seeded_flag saturates (-1000 gate drives the pre-activation well
-    # below zero so relu_tanh outputs zero).
-    Win[SEEDP, L_idx]             = -cal_gain
-    Win[SEEDP, R_idx]             =  cal_gain
-    W[SEEDP, SEEDED_FLAG]         = -1.0e3
-    Win[SEEDN, L_idx]             =  cal_gain
-    Win[SEEDN, R_idx]             = -cal_gain
-    W[SEEDN, SEEDED_FLAG]         = -1.0e3
-
-    W[HEAD_CORR, HEAD_CORR] = 1.0
-    W[HEAD_CORR, SEEDP]     =  1.0
-    W[HEAD_CORR, SEEDN]     = -1.0
-
-    # init_impulse negates the active seed so its net steering
-    # contribution cancels head_corr's integrated response during the
-    # correction window.
-    W[INIT_IMPULSE, SEEDP] = -1.0
-    W[INIT_IMPULSE, SEEDN] =  1.0
+    W[ARMED_FLAG, STEP_COUNTER]   = k_sharp
+    Win[ARMED_FLAG, bias_idx]     = -k_sharp * (float(arm_window_k) - 1.5)
 
     # ── Reward circuit ────────────────────────────────────────────────
     # energy_ramp holds energy(t-1). reward_pulse detects a rising edge
-    # in energy(t) - energy(t-1) once seeded_flag arms it.
+    # in energy(t) - energy(t-1) once armed_flag arms it.
     pulse_gain = 500.0
     pulse_thr  = 0.2
     arm_gate   = 1000.0
@@ -314,7 +285,7 @@ def bio_player():
     Win[ENERGY_RAMP, energy_idx]  = 1.0
     Win[REWARD_PULSE, energy_idx] = pulse_gain
     W[REWARD_PULSE, ENERGY_RAMP]  = -pulse_gain
-    W[REWARD_PULSE, SEEDED_FLAG]  = arm_gate
+    W[REWARD_PULSE, ARMED_FLAG]   = arm_gate
     Win[REWARD_PULSE, bias_idx]   = -(arm_gate + pulse_thr)
 
     # reward_latch: hysteretic OR — fires on any pulse and holds.
@@ -352,7 +323,6 @@ def bio_player():
     # sin_n = sin(phi), cos_n = sin(phi + pi/2) = cos(phi).
     for trig_i in (SIN_N, COS_N):
         W[trig_i, DIR_ACCUM] = 1.0
-        W[trig_i, HEAD_CORR] = 1.0
         W[trig_i, DTHETA]    = 1.0
     Win[COS_N, bias_idx] = np.pi / 2
 
