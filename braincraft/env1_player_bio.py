@@ -5,20 +5,16 @@
 """
 Bio Player for Environment 1.
 
-A pointwise-activation Echo State Network controller: every hidden
-activation f(x)[i] depends only on x[i], and all cross-neuron logic is
-carried by the connectivity matrices. The update is
+A pointwise-activation Echo State Network controller. Every hidden
+activation depends only on its own preactivation; all cross-neuron logic
+is carried by the connectivity matrices:
 
     X(t+1) = f(Win @ I(t) + W @ X(t))
-    O(t+1) = Wout @ g(X(t+1))
+    O(t+1) = Wout @ g(X(t+1))        (g = identity)
 
-with identity readout g(x) = x.
+Input (67 cols): I(t) = [prox[0..63](t), hit(t), energy(t), 1].
 
-Env1 has no colour channel, so the input vector is
-
-    I(t) = [prox[0..63](t), hit(t), energy(t), 1]      (p + 3 = 67 cols)
-
-The hidden pool packs one functional slot per neuron:
+Hidden slots (36 active, rest unused):
 
     0..4    reflex features (hit, proximity, safety)
     5..8    dtheta, integrated heading, position accumulators
@@ -26,16 +22,8 @@ The hidden pool packs one functional slot per neuron:
     16..27  trig helpers, corridor predicates, shortcut trigger
     28..35  phase gates, quadrant ANDs, unsigned front-block
 
-This is the env1 adaptation of env2_player_bio.py. Relative to env2:
-  - the colour-evidence circuit is dropped (no colour input),
-  - the signed front_block_pos/_neg pair collapses to one unsigned
-    front_block with a fixed-direction escape turn, and
-  - the initial-heading correction circuit is dropped — env1 is robust
-    to the ±5° start perturbation because the reflex wall-follower
-    re-aligns the bot before pos_x drift reaches the shortcut corridor
-    bumps (half-width near_c_thr = 0.05).
-
-Constants use snake_case; local hidden-state aliases use UPPER_SNAKE.
+The controller combines a reflex wall-follower, a rising-edge
+energy-reward detector, and a pose-gated corridor shortcut.
 """
 
 import numpy as np
@@ -55,16 +43,15 @@ turn_steps     = 18        # length of the hard-turn phase
 approach_steps = 50        # length of the straight approach phase
 sc_total       = turn_steps + approach_steps
 
-# ── Bio-specific constants ────────────────────────────────────────────
-front_gain_mag     = np.radians(20.0)
-k_sharp            = 50.0            # logistic-like gain for AND/OR/latch gates
-step_a             = np.radians(5.0) # actuator clip (±5°)
-arm_window_k       = 6               # steps before reward detection is armed
+# ── Other constants ───────────────────────────────────────────────────
+front_gain_mag = np.radians(20.0)
+k_sharp        = 50.0              # gain for AND/OR/latch gates
+step_a         = np.radians(5.0)   # actuator clip (±5°)
+arm_window_k   = 6                 # steps before reward detection is armed
 
 
 # ── Neuron index layout ───────────────────────────────────────────────
 def _bio_indices():
-    """Sequential neuron-slot map for the env1 bio controller."""
     idx = {
         "hit_feat":       0,
         "prox_left":      1,
@@ -109,42 +96,29 @@ def _bio_indices():
 
 # ── Pointwise activation dispatch ─────────────────────────────────────
 def make_activation(a, idx):
-    """Build the per-neuron pointwise activation.
-
-    Each out[i] depends only on x[i]. The activation used for neuron i is
-    picked once here from precomputed index arrays:
+    """Per-neuron pointwise activation; each slot uses a fixed scalar fn.
 
         identity  : linear slots (integrators, accumulators, counters)
         sin       : trig helpers (sin_n, cos_n)
         relu      : energy_ramp, sc_countdown
         bump      : max(0, 1 - 4 z^2) — corridor detectors
         clip_a    : dtheta, clipped to ±step_a
-        default   : max(0, tanh(z)) — sparse threshold / latch gates
+        default   : max(0, tanh(z)) — threshold / latch / AND-OR gates
     """
-    id_list = [
-        idx["dir_accum"], idx["pos_x"], idx["pos_y"],
-        idx["shortcut_steer"],
-        idx["step_counter"],
-    ]
-    sin_list    = [idx["sin_n"], idx["cos_n"]]
-    relu_list   = [idx["energy_ramp"], idx["sc_countdown"]]
-    bump_list   = [idx["near_e"], idx["near_w"]]
-
-    id_arr     = np.array(sorted(set(id_list)),     dtype=int)
-    sin_arr    = np.array(sorted(set(sin_list)),    dtype=int)
-    relu_arr   = np.array(sorted(set(relu_list)),   dtype=int)
-    bump_arr   = np.array(sorted(set(bump_list)),   dtype=int)
+    id_arr   = np.array(sorted({idx["dir_accum"], idx["pos_x"], idx["pos_y"],
+                                idx["shortcut_steer"], idx["step_counter"]}),
+                        dtype=int)
+    sin_arr  = np.array(sorted({idx["sin_n"], idx["cos_n"]}), dtype=int)
+    relu_arr = np.array(sorted({idx["energy_ramp"], idx["sc_countdown"]}),
+                        dtype=int)
+    bump_arr = np.array(sorted({idx["near_e"], idx["near_w"]}), dtype=int)
 
     def f(x):
         out = np.maximum(0.0, np.tanh(x))  # default relu_tanh
-        if id_arr.size:
-            out[id_arr, 0] = x[id_arr, 0]
-        if sin_arr.size:
-            out[sin_arr, 0] = np.sin(x[sin_arr, 0])
-        if relu_arr.size:
-            out[relu_arr, 0] = np.maximum(0.0, x[relu_arr, 0])
-        if bump_arr.size:
-            out[bump_arr, 0] = np.maximum(0.0, 1.0 - 4.0 * x[bump_arr, 0] ** 2)
+        out[id_arr, 0]   = x[id_arr, 0]
+        out[sin_arr, 0]  = np.sin(x[sin_arr, 0])
+        out[relu_arr, 0] = np.maximum(0.0, x[relu_arr, 0])
+        out[bump_arr, 0] = np.maximum(0.0, 1.0 - 4.0 * x[bump_arr, 0] ** 2)
         out[idx["dtheta"], 0] = float(np.clip(x[idx["dtheta"], 0], -a, a))
         return out
 
@@ -153,7 +127,7 @@ def make_activation(a, idx):
 
 # ── Player builder ────────────────────────────────────────────────────
 def bio_player():
-    """Build the bio controller for env1. Yields a single frozen model."""
+    """Build the env1 bio controller and yield a single frozen model."""
 
     bot = Bot()
     n = 1000
@@ -171,11 +145,11 @@ def bio_player():
     energy_idx = p + 1                 # 65
     bias_idx   = p + 2                 # 66
 
-    speed  = bot.speed                 # 0.01
-    idx = _bio_indices()
-    a = step_a
+    speed = bot.speed                  # 0.01
+    idx   = _bio_indices()
+    a     = step_a
 
-    # Local aliases — keep wiring lines short and readable.
+    # Short aliases for the wiring block.
     HIT_FEAT       = idx["hit_feat"]
     PROX_LEFT      = idx["prox_left"]
     PROX_RIGHT     = idx["prox_right"]
@@ -200,6 +174,8 @@ def bio_player():
     Y_NEG          = idx["y_neg"]
     NEAR_E         = idx["near_e"]
     NEAR_W         = idx["near_w"]
+    NEAR_CR_E      = idx["near_cr_e"]
+    NEAR_CR_W      = idx["near_cr_w"]
     NEAR_CR        = idx["near_cr"]
     TSC            = idx["trig_sc"]
     ONC            = idx["on_countdown"]
@@ -211,16 +187,13 @@ def bio_player():
     SY_NN          = idx["sy_nn"]
     FB             = idx["front_block"]
 
-    # Ray indices sampled by the reflex/front channels.
-    L_idx          = 20
-    R_idx          = 63 - L_idx         # 43
-    left_side_idx  = 11
-    right_side_idx = 63 - left_side_idx # 52
-    C1_idx, C2_idx = 31, 32              # two centre-front proximity taps
-    front_thr      = 1.4
+    # Ray taps.
+    L_idx, R_idx             = 20, 43     # reflex proximity taps
+    left_side_idx, right_side_idx = 11, 52  # safety taps
+    C1_idx, C2_idx           = 31, 32     # centre-front proximity taps
+    front_thr                = 1.4
 
     TANH1 = np.tanh(1.0)
-
     hit_turn          = np.radians(-10.0) / TANH1
     heading_gain      = np.radians(-40.0)
     safety_gain_left  = np.radians(-20.0)
@@ -236,10 +209,10 @@ def bio_player():
     Win[SAFE_LEFT,   bias_idx]       = safety_target
     Win[SAFE_RIGHT,  bias_idx]       = safety_target
 
-    # Silence reflex features during the shortcut approach so the output
-    # reduces to the front-block + shortcut-steer terms.
-    for reflex_idx in (HIT_FEAT, PROX_LEFT, PROX_RIGHT, SAFE_LEFT, SAFE_RIGHT):
-        W[reflex_idx, ISA] = -k_sharp
+    # Silence reflexes during shortcut approach — readout then reduces
+    # to front_block + shortcut_steer.
+    for r in (HIT_FEAT, PROX_LEFT, PROX_RIGHT, SAFE_LEFT, SAFE_RIGHT):
+        W[r, ISA] = -k_sharp
 
     Wout[0, HIT_FEAT]       = hit_turn
     Wout[0, PROX_LEFT]      = heading_gain
@@ -249,10 +222,9 @@ def bio_player():
     Wout[0, SHORTCUT_STEER] = 1.0
 
     # ── Heading, trig, and position accumulators ──────────────────────
-    # dir_accum integrates every applied dtheta. phi(t) is reconstructed
-    # inside the trig neurons from dir_accum + dtheta (their two incoming
-    # weights of 1). W[DTHETA, :] is filled at the end so that
-    # z_dtheta(t+1) = Wout @ X(t) = O(t).
+    # phi(t) = dir_accum(t) + dtheta(t) is reconstructed inside the trig
+    # neurons. W[DTHETA, :] is mirrored from Wout at the end so that
+    # z_dtheta(t+1) = O(t).
     W[DIR_ACCUM, DIR_ACCUM] = 1.0
     W[DIR_ACCUM, DTHETA]    = 1.0
 
@@ -263,20 +235,15 @@ def bio_player():
     W[POS_Y, COS_N] = speed
 
     # ── Reward arm gate ───────────────────────────────────────────────
-    # step_counter is an identity counter (= t). armed_flag is a sharp
-    # threshold that is 0 for t < arm_window_k and saturates to 1 after.
-    # It holds the reward detector off during the first few steps; env1
-    # has no way to reach a source inside that window, so no
-    # initial-heading correction is needed on top of it.
+    # armed_flag holds the reward detector off for the first arm_window_k
+    # steps. The bot cannot reach a source inside that window.
     W[STEP_COUNTER, STEP_COUNTER] = 1.0
     Win[STEP_COUNTER, bias_idx]   = 1.0
-
     W[ARMED_FLAG, STEP_COUNTER]   = k_sharp
     Win[ARMED_FLAG, bias_idx]     = -k_sharp * (float(arm_window_k) - 1.5)
 
     # ── Reward circuit ────────────────────────────────────────────────
-    # energy_ramp holds energy(t-1). reward_pulse detects a rising edge
-    # in energy(t) - energy(t-1) once armed_flag arms it.
+    # reward_pulse = rising-edge on energy(t) - energy(t-1), once armed.
     pulse_gain = 500.0
     pulse_thr  = 0.2
     arm_gate   = 1000.0
@@ -293,31 +260,28 @@ def bio_player():
     W[REWARD_LATCH, REWARD_LATCH] = latch_gain
 
     # ── Shortcut countdown and phase gates ────────────────────────────
-    # sc_countdown is a relu integrator that decrements by 1 each step
-    # and is reloaded to sc_total when trig_sc fires.
+    # sc_countdown decrements by 1 each step and is reloaded to sc_total
+    # when trig_sc fires. is_turn / is_app split the countdown into a
+    # hard-turn phase and a straight approach phase.
     W[SC_COUNTDOWN, SC_COUNTDOWN] = 1.0
     Win[SC_COUNTDOWN, bias_idx]   = -1.0
     W[SC_COUNTDOWN, TSC]          = float(sc_total) + 1.0
 
-    # on_countdown: sc_countdown(t) > 0.5.
     W[ONC, SC_COUNTDOWN]          = k_sharp
     Win[ONC, bias_idx]            = -0.5 * k_sharp
 
-    # is_turn: sc_countdown(t) > approach_steps + 0.5.
     W[IST, SC_COUNTDOWN]          = k_sharp
     Win[IST, bias_idx]            = -k_sharp * (float(approach_steps) + 0.5)
 
-    # is_app: on_countdown AND NOT is_turn.
     W[ISA, ONC]                   =  k_sharp
     W[ISA, IST]                   = -k_sharp
     Win[ISA, bias_idx]            = -0.5 * k_sharp
 
-    # Shortcut steering: turn_toward = sign(sin(phi)) * sign(y),
-    # enabled only while is_turn is high.
-    W[SHORTCUT_STEER, SY_PP] =  abs(shortcut_turn)  # sin+, y+
-    W[SHORTCUT_STEER, SY_NN] =  abs(shortcut_turn)  # sin-, y-
-    W[SHORTCUT_STEER, SY_PN] = -abs(shortcut_turn)  # sin+, y-
-    W[SHORTCUT_STEER, SY_NP] = -abs(shortcut_turn)  # sin-, y+
+    # Shortcut steering: sign(sin(phi)) * sign(y), enabled only in turn.
+    W[SHORTCUT_STEER, SY_PP] =  abs(shortcut_turn)
+    W[SHORTCUT_STEER, SY_NN] =  abs(shortcut_turn)
+    W[SHORTCUT_STEER, SY_PN] = -abs(shortcut_turn)
+    W[SHORTCUT_STEER, SY_NP] = -abs(shortcut_turn)
 
     # ── Trig neurons (sin-only activation) ────────────────────────────
     # sin_n = sin(phi), cos_n = sin(phi + pi/2) = cos(phi).
@@ -326,7 +290,6 @@ def bio_player():
         W[trig_i, DTHETA]    = 1.0
     Win[COS_N, bias_idx] = np.pi / 2
 
-    # Sharp sign detectors on sin(phi) and pos_y, used by the quadrant ANDs.
     W[SIN_POS, SIN_N] =  k_sharp
     W[SIN_NEG, SIN_N] = -k_sharp
     W[Y_POS,   POS_Y] =  k_sharp
@@ -334,80 +297,60 @@ def bio_player():
 
     # ── Corridor tests ────────────────────────────────────────────────
     # Bump half-width is 0.5 in pre-activation space, so scale pos_x by
-    # 1/(2*near_c_thr) to get a bump width of ±near_c_thr in world units.
+    # 1/(2*near_c_thr) for a ±near_c_thr bump in world units.
     bump_scale = 1.0 / (2.0 * near_c_thr)
-
-    # near_e fires when pos_x is near -drift_offset (west of centre,
-    # heading east); near_w is the mirror.
-    W[NEAR_E, POS_X]   = bump_scale
+    W[NEAR_E, POS_X]      = bump_scale
     Win[NEAR_E, bias_idx] =  drift_offset * bump_scale
-    W[NEAR_W, POS_X]   = bump_scale
+    W[NEAR_W, POS_X]      = bump_scale
     Win[NEAR_W, bias_idx] = -drift_offset * bump_scale
 
-    # Heading-gated corridor-entry detectors. sin_n tracks -cos(phi) here
-    # (dir_accum integrates phi − π/2, so the neuron literally named sin_n
-    # outputs sin of that shifted angle = -cos(phi)); sin_n ≈ -1 is east,
-    # sin_n ≈ +1 is west. The AND threshold at ±0.5 accepts headings
-    # within ~±60° of horizontal — normal perimeter approaches have
-    # |sin_n| > 0.95 at the trigger moment, and perpendicular passes
-    # (heading north/south over pos_x = ±drift_offset on a later lap)
-    # are rejected cleanly.
+    # Heading-gated corridor entries. dir_accum integrates phi − π/2, so
+    # the neuron named sin_n outputs sin of that shifted angle = -cos(phi):
+    # sin_n ≈ -1 while heading east, ≈ +1 while heading west. The ±0.5
+    # margin accepts headings within ~±60° of horizontal and rejects
+    # perpendicular crossings of pos_x = ±drift_offset on later laps.
     ncr_gain = 2.5
-    NEAR_CR_E = idx["near_cr_e"]
-    NEAR_CR_W = idx["near_cr_w"]
-    W[NEAR_CR_E, NEAR_E]      =  ncr_gain * k_sharp
-    W[NEAR_CR_E, SIN_N]       = -ncr_gain * k_sharp    # sin_n ~= -1 => east
-    Win[NEAR_CR_E, bias_idx]  = -ncr_gain * k_sharp * 1.5
-    W[NEAR_CR_W, NEAR_W]      =  ncr_gain * k_sharp
-    W[NEAR_CR_W, SIN_N]       =  ncr_gain * k_sharp    # sin_n ~= +1 => west
-    Win[NEAR_CR_W, bias_idx]  = -ncr_gain * k_sharp * 1.5
+    W[NEAR_CR_E, NEAR_E]     =  ncr_gain * k_sharp
+    W[NEAR_CR_E, SIN_N]      = -ncr_gain * k_sharp       # east
+    Win[NEAR_CR_E, bias_idx] = -ncr_gain * k_sharp * 1.5
+    W[NEAR_CR_W, NEAR_W]     =  ncr_gain * k_sharp
+    W[NEAR_CR_W, SIN_N]      =  ncr_gain * k_sharp       # west
+    Win[NEAR_CR_W, bias_idx] = -ncr_gain * k_sharp * 1.5
 
-    # near_cr = near_cr_e OR near_cr_w. The 2.5x gain keeps the OR-gate
-    # transition sharp across BLAS-level roundoff in the inputs.
+    # near_cr = near_cr_e OR near_cr_w. The 2.5× gain keeps the OR-gate
+    # transition sharp across BLAS-level roundoff.
     near_cr_gain = 2.5
-    W[NEAR_CR, NEAR_CR_E] = near_cr_gain * k_sharp
-    W[NEAR_CR, NEAR_CR_W] = near_cr_gain * k_sharp
+    W[NEAR_CR, NEAR_CR_E]  = near_cr_gain * k_sharp
+    W[NEAR_CR, NEAR_CR_W]  = near_cr_gain * k_sharp
     Win[NEAR_CR, bias_idx] = -0.5 * near_cr_gain * k_sharp
 
     # ── Shortcut trigger (2-way AND with refractory) ──────────────────
     # trig_sc fires when reward has been seen AND the heading-gated
-    # corridor-entry neuron fires. near_cr_e/near_cr_w already encode
-    # "position at corridor entry + heading toward the clear corridor
-    # axis", which is a sufficient precondition on its own.
+    # corridor-entry neuron fires; two refractory terms block re-firing
+    # during the countdown.
     W[TSC, REWARD_LATCH] = k_sharp
     W[TSC, NEAR_CR]      = k_sharp
     Win[TSC, bias_idx]   = -k_sharp * 1.5
-    W[TSC, TSC]          = -k_sharp * 10     # self-refractory
-    W[TSC, SC_COUNTDOWN] = -k_sharp           # blocked while countdown runs
+    W[TSC, TSC]          = -k_sharp * 10    # self-refractory
+    W[TSC, SC_COUNTDOWN] = -k_sharp          # blocked while countdown runs
 
     # ── Quadrant ANDs for shortcut steering direction ─────────────────
-    # Each sy_* = AND(sin-sign, y-sign, is_turn), implemented as a
-    # 3-input threshold gate.
-    W[SY_PP, SIN_POS] = k_sharp
-    W[SY_PP, Y_POS]   = k_sharp
-    W[SY_PP, IST]     = k_sharp
-    Win[SY_PP, bias_idx] = -2.5 * k_sharp
+    # Each sy_* = AND(sin-sign, y-sign, is_turn).
+    for sy, sx_sign, sy_sign in (
+        (SY_PP, SIN_POS, Y_POS),
+        (SY_PN, SIN_POS, Y_NEG),
+        (SY_NP, SIN_NEG, Y_POS),
+        (SY_NN, SIN_NEG, Y_NEG),
+    ):
+        W[sy, sx_sign]     = k_sharp
+        W[sy, sy_sign]     = k_sharp
+        W[sy, IST]         = k_sharp
+        Win[sy, bias_idx]  = -2.5 * k_sharp
 
-    W[SY_PN, SIN_POS] = k_sharp
-    W[SY_PN, Y_NEG]   = k_sharp
-    W[SY_PN, IST]     = k_sharp
-    Win[SY_PN, bias_idx] = -2.5 * k_sharp
-
-    W[SY_NP, SIN_NEG] = k_sharp
-    W[SY_NP, Y_POS]   = k_sharp
-    W[SY_NP, IST]     = k_sharp
-    Win[SY_NP, bias_idx] = -2.5 * k_sharp
-
-    W[SY_NN, SIN_NEG] = k_sharp
-    W[SY_NN, Y_NEG]   = k_sharp
-    W[SY_NN, IST]     = k_sharp
-    Win[SY_NN, bias_idx] = -2.5 * k_sharp
-
-    # ── Front-block channel (unsigned, no colour gating) ──────────────
-    # Env1 has no colour input, so the signed front_block_pos/_neg pair
-    # of env2 collapses to a single unsigned detector. Fires when the two
-    # centre proximity taps exceed front_thr and drives a fixed-direction
-    # escape turn (CCW, +front_gain_mag) via Wout[0, FB].
+    # ── Front-block channel (unsigned) ────────────────────────────────
+    # Fires when the two centre proximity taps exceed front_thr. A
+    # positive reading turns the bot in a fixed direction (CCW) via
+    # Wout — a simple bounce-off-the-wall escape.
     Win[FB, C1_idx]   = 1.0
     Win[FB, C2_idx]   = 1.0
     Win[FB, bias_idx] = -front_thr
@@ -415,9 +358,7 @@ def bio_player():
     Wout[0, FB] = front_gain_mag
 
     # ── dtheta readout tie-back ───────────────────────────────────────
-    # z_dtheta(t+1) = Wout @ X(t) = O(t), implemented by mirroring the
-    # output row into W[DTHETA, :]. After clipping, dtheta(t+1) is the
-    # previous step's steering command bounded to ±step_a.
+    # Mirror Wout into W[DTHETA, :] so dtheta(t+1) = clip(O(t), ±step_a).
     for j in range(n):
         if Wout[0, j] != 0.0:
             W[DTHETA, j] = Wout[0, j]
@@ -435,8 +376,6 @@ if __name__ == "__main__":
     np.random.seed(seed)
     print("Training bio player for env1...")
     model = train(bio_player, timeout=100)
-
-    W_in, W, W_out, warmup, leak, f, g = model
 
     start_time = time.time()
     score, std = evaluate(model, Bot, Environment, debug=False, seed=seed)
