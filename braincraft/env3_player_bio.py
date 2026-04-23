@@ -5,31 +5,21 @@
 """
 Bio Player for Environment 3.
 
-A pointwise-activation Echo State Network controller. Every hidden
-activation depends only on its own preactivation; all cross-neuron logic
-is carried by the connectivity matrices:
+Pointwise-activation Echo State Network controller:
 
     X(t+1) = f(Win @ I(t) + W @ X(t))
     O(t+1) = Wout @ g(X(t+1))        (g = identity)
 
+Every hidden activation depends only on its own preactivation; all
+cross-neuron logic is carried by the connectivity matrices.
+
 Input (131 cols): I(t) = [prox[0..63](t), colour[0..63](t),
                           hit(t), energy(t), 1].
 Env3 exposes colour, but this controller does not read it — the bot
-simply runs around the outer corridor with a reflex wall-follower and
-picks up whatever source it happens to cross. Compared with the env1
-bio player we drop:
+runs around the outer corridor with a reflex wall-follower and picks
+up whatever source it happens to cross.
 
-    * the initial-heading correction latch (seed_pos/neg, head_corr,
-      init_impulse, step_counter, seeded_flag),
-    * the rising-edge reward circuit (energy_ramp, reward_pulse,
-      reward_latch), and
-    * the pose-gated corridor shortcut (sc_countdown, phase gates,
-      trig_sc, near_e/w, near_cr_*, sin_n, cos_n, sin_pos/neg,
-      y_pos/neg, quadrant ANDs, shortcut_steer, dir_accum, pos_x,
-      pos_y).
-
-Every neuron that existed only to support those three circuits is
-removed. The remaining controller uses 7 hidden slots:
+Seven hidden slots:
 
     0..4    reflex features (hit, proximity, safety)
     5       dtheta (clipped one-step-lagged steering command)
@@ -45,14 +35,11 @@ from bot import Bot
 from environment_3 import Environment
 
 
-# ── Bio-specific constants ────────────────────────────────────────────
 front_gain_mag = np.radians(20.0)
 step_a         = np.radians(5.0)      # actuator clip (±5°)
 
 
-# ── Neuron index layout ───────────────────────────────────────────────
 def _bio_indices():
-    """Sequential neuron-slot map for the env3 bio controller."""
     idx = {
         "hit_feat":    0,
         "prox_left":   1,
@@ -66,22 +53,16 @@ def _bio_indices():
     return idx
 
 
-# ── Pointwise activation dispatch ─────────────────────────────────────
 def make_activation(a, idx):
-    """Per-neuron pointwise activation; each slot uses a fixed scalar fn.
-
-        clip_a   : dtheta, clipped to ±step_a
-        default  : max(0, tanh(z)) — reflex channels and front-block
-    """
+    """Per-neuron pointwise activation: clip for dtheta, relu_tanh elsewhere."""
     def f(x):
-        out = np.maximum(0.0, np.tanh(x))  # default relu_tanh
+        out = np.maximum(0.0, np.tanh(x))
         out[idx["dtheta"], 0] = float(np.clip(x[idx["dtheta"], 0], -a, a))
         return out
 
     return f
 
 
-# ── Player builder ────────────────────────────────────────────────────
 def bio_player():
     """Build the env3 bio controller and yield a single frozen model."""
 
@@ -90,10 +71,11 @@ def bio_player():
     p = bot.camera.resolution          # 64
     warmup = 0
     leak = 1.0
-    g = lambda x: x                    # identity readout
+    g = lambda x: x
 
-    # Env3 feeds I = [depths, colours, hit, energy, 1]. We do not read
-    # colour or energy, but must index hit/bias at the full 2p+3 offsets.
+    # Env3 feeds I = [depths, colours, hit, energy, 1]. Colour and energy
+    # columns are unread but the hit/bias indices sit at the full 2p+3
+    # offsets.
     n_inputs = 2 * p + 3               # 131
     Win  = np.zeros((n, n_inputs))
     W    = np.zeros((n, n))
@@ -105,7 +87,6 @@ def bio_player():
     idx = _bio_indices()
     a   = step_a
 
-    # Short aliases for the wiring block.
     HIT_FEAT   = idx["hit_feat"]
     PROX_LEFT  = idx["prox_left"]
     PROX_RIGHT = idx["prox_right"]
@@ -114,7 +95,6 @@ def bio_player():
     DTHETA     = idx["dtheta"]
     FB         = idx["front_block"]
 
-    # Ray taps.
     L_idx, R_idx                  = 20, 43     # reflex proximity taps
     left_side_idx, right_side_idx = 11, 52     # safety taps
     C1_idx, C2_idx                = 31, 32     # centre-front proximity taps
@@ -127,7 +107,7 @@ def bio_player():
     safety_gain_right = -safety_gain_left
     safety_target     = 0.75
 
-    # ── Reflex features and steering readout ──────────────────────────
+    # Reflex features and steering readout.
     Win[HIT_FEAT,    hit_idx]        = 1.0
     Win[PROX_LEFT,   L_idx]          = 1.0
     Win[PROX_RIGHT,  R_idx]          = 1.0
@@ -142,17 +122,14 @@ def bio_player():
     Wout[0, SAFE_LEFT]  = safety_gain_left
     Wout[0, SAFE_RIGHT] = safety_gain_right
 
-    # ── Front-block channel (unsigned) ────────────────────────────────
-    # Fires when the two centre proximity taps exceed front_thr. A
-    # positive reading turns the bot in a fixed direction (CCW) via
-    # Wout — a simple bounce-off-the-wall escape.
+    # Unsigned front-block: fires when the two centre proximity taps
+    # exceed front_thr and drives a fixed-direction (CCW) escape turn.
     Win[FB, C1_idx]   = 1.0
     Win[FB, C2_idx]   = 1.0
     Win[FB, bias_idx] = -front_thr
 
     Wout[0, FB] = front_gain_mag
 
-    # ── dtheta readout tie-back ───────────────────────────────────────
     # Mirror Wout into W[DTHETA, :] so dtheta(t+1) = clip(O(t), ±step_a).
     for j in range(n):
         if Wout[0, j] != 0.0:
