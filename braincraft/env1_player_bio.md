@@ -15,12 +15,14 @@ O(t+1) = Wout @ g(X(t+1))        (g = identity)
 The model is produced by a single `yield` in `bio_player()`, so the
 matrices are fixed at build time (no iterative training).
 
-The controller combines three behaviours:
+The controller combines four behaviours:
 
 - a **reflex wall-follower** (proximity, safety, hit),
-- a **pose-gated corridor shortcut** that fires when an energy reward
-  has been seen and the bot crosses a clear horizontal corridor, and
-- a **rising-edge energy-reward detector** that arms the shortcut.
+- an **initial-heading correction** that erases the ±5° start-direction
+  perturbation and keeps `pos_x` / `pos_y` integration faithful,
+- a **rising-edge energy-reward detector** that arms the shortcut, and
+- a **pose-gated corridor shortcut** that fires when the reward has been
+  seen and the bot crosses a clear horizontal corridor.
 
 The env2 bio player extends this design with a colour-evidence circuit
 and a signed front-block; see `env2_player_bio.md` for that variant.
@@ -46,7 +48,8 @@ near_c_thr     = 0.05          approach_steps = 50
 drift_offset   = 0.175         sc_total       = 68
 k_sharp        = 50.0          ncr_gain       = 2.5
 front_gain_mag = 20°           near_cr_gain   = 2.5
-step_a         = 5°            arm_window_k   = 6
+step_a         = 5°            seed_window_k  = 6
+cal_gain       = 1 / 0.173
 ```
 
 ## 3. Activation library
@@ -54,14 +57,14 @@ step_a         = 5°            arm_window_k   = 6
 Each slot has a fixed scalar activation applied pointwise to its
 preactivation `z`:
 
-| Name        | Formula                     | Used by                                                                      |
-| ----------- | --------------------------- | ---------------------------------------------------------------------------- |
-| `relu_tanh` | `max(0, tanh(z))`           | default — threshold / latch / AND-OR gates                                   |
-| `identity`  | `z`                         | `dir_accum`, `pos_x`, `pos_y`, `shortcut_steer`, `step_counter`              |
-| `relu`      | `max(0, z)`                 | `energy_ramp`, `sc_countdown`                                                |
-| `clip_a`    | `clip(z, -step_a, +step_a)` | `dtheta`                                                                     |
-| `sin`       | `sin(z)`                    | `sin_n`, `cos_n`                                                             |
-| `bump`      | `max(0, 1 - 4 z^2)`         | `near_e`, `near_w`                                                           |
+| Name        | Formula                     | Used by                                                                                                  |
+| ----------- | --------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `relu_tanh` | `max(0, tanh(z))`           | default — threshold / latch / AND-OR gates                                                               |
+| `identity`  | `z`                         | `dir_accum`, `pos_x`, `pos_y`, `head_corr`, `shortcut_steer`, `init_impulse`, `step_counter`             |
+| `relu`      | `max(0, z)`                 | `energy_ramp`, `sc_countdown`                                                                            |
+| `clip_a`    | `clip(z, -step_a, +step_a)` | `dtheta`                                                                                                 |
+| `sin`       | `sin(z)`                    | `sin_n`, `cos_n`                                                                                         |
+| `bump`      | `max(0, 1 - 4 z^2)`         | `near_e`, `near_w`                                                                                       |
 
 ## 4. Inputs and slot layout
 
@@ -82,7 +85,7 @@ energy_idx     = 65
 bias_idx       = 66
 ```
 
-Hidden slots (`n = 1000`; slots `36..999` receive no incoming weights):
+Hidden slots (`n = 1000`; slots `40..999` receive no incoming weights):
 
 | Slot | Name              | Activation  | Role                                               |
 | ---- | ----------------- | ----------- | -------------------------------------------------- |
@@ -95,33 +98,37 @@ Hidden slots (`n = 1000`; slots `36..999` receive no incoming weights):
 | 6    | `dir_accum`       | `identity`  | integrated heading                                 |
 | 7    | `pos_x`           | `identity`  | integrated x position                              |
 | 8    | `pos_y`           | `identity`  | integrated y position                              |
-| 9    | `step_counter`    | `identity`  | step index                                         |
-| 10   | `armed_flag`      | `relu_tanh` | reward arm-gate latch                              |
-| 11   | `energy_ramp`     | `relu`      | previous-step energy                               |
-| 12   | `reward_pulse`    | `relu_tanh` | energy rising-edge detector                        |
-| 13   | `reward_latch`    | `relu_tanh` | latched reward-seen signal                         |
-| 14   | `sc_countdown`    | `relu`      | shortcut phase countdown                           |
-| 15   | `shortcut_steer`  | `identity`  | shortcut steering actuator                         |
-| 16   | `sin_n`           | `sin`       | `sin(phi)`                                         |
-| 17   | `cos_n`           | `sin`       | `cos(phi)` (via `sin(phi + π/2)`)                  |
-| 18   | `sin_pos`         | `relu_tanh` | `sin(phi) > 0` sharp detector                      |
-| 19   | `sin_neg`         | `relu_tanh` | `sin(phi) < 0` sharp detector                      |
-| 20   | `y_pos`           | `relu_tanh` | `pos_y > 0` sharp detector                         |
-| 21   | `y_neg`           | `relu_tanh` | `pos_y < 0` sharp detector                         |
-| 22   | `near_e`          | `bump`      | east-shifted corridor bump                         |
-| 23   | `near_w`          | `bump`      | west-shifted corridor bump                         |
-| 24   | `near_cr_e`       | `relu_tanh` | AND(`near_e`, heading east)                        |
-| 25   | `near_cr_w`       | `relu_tanh` | AND(`near_w`, heading west)                        |
-| 26   | `near_cr`         | `relu_tanh` | corridor predicate (OR of the two)                 |
-| 27   | `trig_sc`         | `relu_tanh` | shortcut trigger pulse                             |
-| 28   | `on_countdown`    | `relu_tanh` | `sc_countdown > 0.5`                               |
-| 29   | `is_turn`         | `relu_tanh` | turn-phase gate                                    |
-| 30   | `is_app`          | `relu_tanh` | approach-phase gate                                |
-| 31   | `sy_pp`           | `relu_tanh` | AND(`sin_pos`, `y_pos`, `is_turn`)                 |
-| 32   | `sy_pn`           | `relu_tanh` | AND(`sin_pos`, `y_neg`, `is_turn`)                 |
-| 33   | `sy_np`           | `relu_tanh` | AND(`sin_neg`, `y_pos`, `is_turn`)                 |
-| 34   | `sy_nn`           | `relu_tanh` | AND(`sin_neg`, `y_neg`, `is_turn`)                 |
-| 35   | `front_block`     | `relu_tanh` | unsigned front-block detector                      |
+| 9    | `head_corr`       | `identity`  | latched initial-heading correction                 |
+| 10   | `seeded_flag`     | `relu_tanh` | seed-window latch (also arms the reward pulse)     |
+| 11   | `step_counter`    | `identity`  | step index (drives `seeded_flag` timing)           |
+| 12   | `seed_pos`        | `relu_tanh` | positive initial-correction pulse                  |
+| 13   | `seed_neg`        | `relu_tanh` | negative initial-correction pulse                  |
+| 14   | `energy_ramp`     | `relu`      | previous-step energy                               |
+| 15   | `reward_pulse`    | `relu_tanh` | energy rising-edge detector                        |
+| 16   | `reward_latch`    | `relu_tanh` | latched reward-seen signal                         |
+| 17   | `sc_countdown`    | `relu`      | shortcut phase countdown                           |
+| 18   | `shortcut_steer`  | `identity`  | shortcut steering actuator                         |
+| 19   | `init_impulse`    | `identity`  | initial-correction steering actuator               |
+| 20   | `sin_n`           | `sin`       | `sin(phi)`                                         |
+| 21   | `cos_n`           | `sin`       | `cos(phi)` (via `sin(phi + π/2)`)                  |
+| 22   | `sin_pos`         | `relu_tanh` | `sin(phi) > 0` sharp detector                      |
+| 23   | `sin_neg`         | `relu_tanh` | `sin(phi) < 0` sharp detector                      |
+| 24   | `y_pos`           | `relu_tanh` | `pos_y > 0` sharp detector                         |
+| 25   | `y_neg`           | `relu_tanh` | `pos_y < 0` sharp detector                         |
+| 26   | `near_e`          | `bump`      | east-shifted corridor bump                         |
+| 27   | `near_w`          | `bump`      | west-shifted corridor bump                         |
+| 28   | `near_cr_e`       | `relu_tanh` | AND(`near_e`, heading east)                        |
+| 29   | `near_cr_w`       | `relu_tanh` | AND(`near_w`, heading west)                        |
+| 30   | `near_cr`         | `relu_tanh` | corridor predicate (OR of the two)                 |
+| 31   | `trig_sc`         | `relu_tanh` | shortcut trigger pulse                             |
+| 32   | `on_countdown`    | `relu_tanh` | `sc_countdown > 0.5`                               |
+| 33   | `is_turn`         | `relu_tanh` | turn-phase gate                                    |
+| 34   | `is_app`          | `relu_tanh` | approach-phase gate                                |
+| 35   | `sy_pp`           | `relu_tanh` | AND(`sin_pos`, `y_pos`, `is_turn`)                 |
+| 36   | `sy_pn`           | `relu_tanh` | AND(`sin_pos`, `y_neg`, `is_turn`)                 |
+| 37   | `sy_np`           | `relu_tanh` | AND(`sin_neg`, `y_pos`, `is_turn`)                 |
+| 38   | `sy_nn`           | `relu_tanh` | AND(`sin_neg`, `y_neg`, `is_turn`)                 |
+| 39   | `front_block`     | `relu_tanh` | unsigned front-block detector                      |
 
 ## 5. Main circuits
 
@@ -147,6 +154,7 @@ O(t+1) = hit_turn          * hit_feat(t+1)
        + safety_gain_right * safe_right(t+1)
        + front_gain_mag    * front_block(t+1)
        + shortcut_steer(t+1)
+       + init_impulse(t+1)
 ```
 
 with
@@ -168,7 +176,7 @@ row 0 into `W[dtheta, :]`.
 ```text
 dir_accum(t+1) = dir_accum(t) + dtheta(t)
 
-phi(t)      = dir_accum(t) + dtheta(t)
+phi(t)      = dir_accum(t) + head_corr(t) + dtheta(t)
 sin_n(t+1)  = sin(phi(t))
 cos_n(t+1)  = sin(phi(t) + π/2)       # = cos(phi(t))
 
@@ -177,24 +185,59 @@ pos_y(t+1) = pos_y(t) + speed * cos_n(t)
 ```
 
 `phi` is measured relative to north: `phi = 0` points north, `-π/2`
-east, `+π/2` west. The internal `phi` inherits the random ±5° start
-perturbation; downstream gates tolerate it (see §5.4).
+east, `+π/2` west. The `head_corr` term inside the trig neurons
+compensates for the random ±5° start-direction perturbation (see §5.3)
+so that `sin_n` / `cos_n` — and the `pos_x` / `pos_y` integrators that
+read them — track the bot's true heading and position faithfully.
 
-### 5.3 Reward arm gate and reward circuit
+### 5.3 Initial-heading correction
 
-With `pulse_gain = 500`, `pulse_thr = 0.2`, `arm_gate = 1000`,
-`latch_gain = 10`, `arm_window_k = 6`:
+The raw signed correction is
+
+```text
+current_corr(t) = (prox[R_idx](t) - prox[L_idx](t)) * cal_gain
+```
+
+The latch is built from `step_counter`, `seeded_flag`, `seed_pos`,
+`seed_neg`, `head_corr`, and `init_impulse`. `step_counter` is an
+identity-activation counter (`step_counter(t) = t`), and `seeded_flag`
+is a sharp threshold against it:
 
 ```text
 step_counter(t+1) = step_counter(t) + 1
-armed_flag(t+1)   = relu_tanh(k_sharp * (step_counter(t) - (arm_window_k - 1.5)))
+seeded_flag(t+1)  = relu_tanh(k_sharp * (step_counter(t) - (seed_window_k - 1.5)))
 
-energy_ramp(t+1)  = relu(energy(t))
+seed_pos(t+1) = relu_tanh(-cal_gain*prox[L_idx](t) + cal_gain*prox[R_idx](t)
+                          - 1000 * seeded_flag(t))
+seed_neg(t+1) = relu_tanh( cal_gain*prox[L_idx](t) - cal_gain*prox[R_idx](t)
+                          - 1000 * seeded_flag(t))
+
+head_corr(t+1)    = head_corr(t) + seed_pos(t) - seed_neg(t)
+init_impulse(t+1) = -seed_pos(t) + seed_neg(t)
+```
+
+With `seed_window_k = 6`, `seeded_flag(t) = 0` for `t = 0..5` and
+saturates to `1` for `t ≥ 6`. Because `seed_pos(t+1)` reads
+`seeded_flag(t)`, the seeds fire for six consecutive network steps
+(`t = 1..6`). `head_corr` integrates each step's residual depth
+asymmetry across the window while `init_impulse` steers against the
+same seed — the net output contribution cancels, so the bot does not
+physically turn while the controller's internal heading frame is being
+aligned. The closed loop drives the residual heading error toward zero
+across the six-step window.
+
+### 5.4 Reward circuit
+
+With `pulse_gain = 500`, `pulse_thr = 0.2`, `arm_gate = 1000`,
+`latch_gain = 10`:
+
+```text
+energy_ramp(t+1) = relu(energy(t))
 
 reward_pulse(t+1) = relu_tanh(
     pulse_gain * energy(t)
   - pulse_gain * energy_ramp(t)
-  + arm_gate   * armed_flag(t)
+  + arm_gate   * seeded_flag(t)
   - (arm_gate + pulse_thr)
 )
 
@@ -202,11 +245,13 @@ reward_latch(t+1) = relu_tanh(latch_gain * reward_pulse(t)
                               + latch_gain * reward_latch(t))
 ```
 
-`armed_flag` is `0` for `t < 6` and saturates to `1` after, holding the
-pulse off while the bot is still far from any source; once armed, the
-node reduces to a sharp rising-edge detector on `energy(t) - energy(t-1)`.
+`seeded_flag` doubles as the reward arm gate: the pulse is held off by
+the `-(arm_gate + pulse_thr)` bias for the first `seed_window_k` steps
+and, once the seed window closes, reduces to a sharp rising-edge
+detector on `energy(t) - energy(t-1)`. The bot cannot reach any source
+inside the short seed window, so arming only after it closes is safe.
 
-### 5.4 Corridor tests and shortcut trigger
+### 5.5 Corridor tests and shortcut trigger
 
 Two bump detectors on `pos_x`:
 
@@ -226,10 +271,10 @@ near_cr_w(t+1) = relu_tanh(ncr_gain * k_sharp * (near_w(t) + sin_n(t) - 1.5))
 ```
 
 The `±0.5` margin accepts headings within `~±60°` of horizontal
-(normal approaches have `|sin_n| > 0.95` at the trigger, easily
-tolerating the ±5° start perturbation) while rejecting perpendicular
-crossings of `pos_x = ±drift_offset` on later laps. `ncr_gain = 2.5`
-sharpens the AND so near-threshold inputs don't fire partially.
+(normal approaches have `|sin_n| > 0.95` at the trigger) while
+rejecting perpendicular crossings of `pos_x = ±drift_offset` on later
+laps. `ncr_gain = 2.5` sharpens the AND so near-threshold inputs don't
+fire partially.
 
 The corridor predicate is a sharpened OR:
 
@@ -247,7 +292,7 @@ trig_sc(t+1) = relu_tanh(
 )
 ```
 
-### 5.5 Shortcut countdown, phases, and steering
+### 5.6 Shortcut countdown, phases, and steering
 
 ```text
 sc_countdown(t+1) = relu(sc_countdown(t) - 1 + (sc_total + 1) * trig_sc(t))
@@ -269,7 +314,7 @@ sy_nn(t+1) = relu_tanh(k_sharp * (sin_neg(t) + y_neg(t) + is_turn(t) - 2.5))
 shortcut_steer(t+1) = |shortcut_turn| * (sy_pp(t) + sy_nn(t) - sy_pn(t) - sy_np(t))
 ```
 
-### 5.6 Front block
+### 5.7 Front block
 
 An unsigned front-block from the two centre proximity taps:
 
@@ -290,9 +335,10 @@ Wout[safe_left]       = safety_gain_left  = -20°
 Wout[safe_right]      = safety_gain_right = +20°
 Wout[front_block]     = +front_gain_mag   = +20°
 Wout[shortcut_steer]  = +1
+Wout[init_impulse]    = +1
 ```
 
-All other `Wout` entries are zero (seven nonzero weights). The same
+All other `Wout` entries are zero (eight nonzero weights). The same
 row is mirrored into `W[dtheta, :]` so that `dtheta(t+1) = clip(O(t),
 ±step_a)`.
 
@@ -307,5 +353,5 @@ Runs `train(bio_player, timeout=100)` followed by
 episodes. Observed output:
 
 ```text
-Final score (distance): 14.41 +/- 0.36
+Final score (distance): 14.40 +/- 0.36
 ```

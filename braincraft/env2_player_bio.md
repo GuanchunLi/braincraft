@@ -143,6 +143,7 @@ Hidden slots in allocator order:
 | 48        | `fs_pos`          | `relu_tanh` | latched positive front sign                        |
 | 49        | `fs_neg`          | `relu_tanh` | latched negative front sign                        |
 | 50..113   | `xi_blue[0..63]`  | `bump`      | per-ray blue detector (bump centred at colour `4`) |
+| 114..999  | unused            | --          | no incoming weights                                |
 
 ## 5. Main circuits
 

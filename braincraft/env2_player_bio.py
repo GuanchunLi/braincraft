@@ -399,14 +399,11 @@ def bio_player():
     W[NEAR_W, POS_X]   = bump_scale
     Win[NEAR_W, bias_idx] = -drift_offset * bump_scale
 
-    # Heading-gated corridor-entry detectors. sin_n tracks -cos(phi) here
-    # (dir_accum integrates phi − π/2, so the neuron literally named sin_n
-    # outputs sin of that shifted angle = -cos(phi)); sin_n ≈ -1 is east,
-    # sin_n ≈ +1 is west. The AND threshold at ±0.5 accepts headings
-    # within ~±60° of horizontal — normal perimeter approaches have
-    # |sin_n| > 0.95 at the trigger moment, and perpendicular passes
-    # (heading north/south over pos_x = ±drift_offset on a later lap)
-    # are rejected cleanly.
+    # Heading-gated corridor-entry detectors. The internal heading is
+    # represented relative to north, so sin_n = sin(phi_internal): east is
+    # near -1 and west is near +1. The AND threshold at +/-0.5 accepts
+    # headings within roughly +/-60 degrees of horizontal, while rejecting
+    # perpendicular north/south crossings of pos_x = +/-drift_offset.
     ncr_gain = 2.5
     NEAR_CR_E = idx["near_cr_e"]
     NEAR_CR_W = idx["near_cr_w"]
