@@ -343,11 +343,11 @@ def bio_player():
     W[NEAR_W, POS_X]      = bump_scale
     Win[NEAR_W, bias_idx] = -drift_offset * bump_scale
 
-    # Heading-gated corridor entries. dir_accum integrates phi − π/2, so
-    # the neuron named sin_n outputs sin of that shifted angle = -cos(phi):
-    # sin_n ≈ -1 while heading east, ≈ +1 while heading west. The ±0.5
-    # margin accepts headings within ~±60° of horizontal and rejects
-    # perpendicular crossings of pos_x = ±drift_offset on later laps.
+    # Heading-gated corridor entries. phi is measured from north, and
+    # sin_n = sin(phi), so sin_n ≈ -1 while heading east and ≈ +1 while
+    # heading west. The ±0.5 margin accepts headings within ~±60° of
+    # horizontal and rejects perpendicular crossings of
+    # pos_x = ±drift_offset on later laps.
     ncr_gain = 2.5
     W[NEAR_CR_E, NEAR_E]     =  ncr_gain * k_sharp
     W[NEAR_CR_E, SIN_N]      = -ncr_gain * k_sharp       # east
